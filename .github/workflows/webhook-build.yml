@@ -11,6 +11,10 @@ on:
     branches: [master, main, develop]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -210,7 +214,7 @@ jobs:
           # In production, these would be rebuilt with webhook code integrated
           
           IMAGE_TAG="webhook-${GITHUB_SHA::8}"
-          REGISTRY="ghcr.io/${{ github.repository_owner }}"
+          REGISTRY="ghcr.io/oculairmedia"
           
           echo "Building webhook-enhanced images with tag: ${IMAGE_TAG}"
           
@@ -232,12 +236,12 @@ jobs:
           EOF
           
           # Build webhook-enhanced transactor image
-          docker build -f Dockerfile.webhook -t "${REGISTRY}/huly-transactor-webhook:${IMAGE_TAG}" build-temp/
-          docker push "${REGISTRY}/huly-transactor-webhook:${IMAGE_TAG}"
+          docker build -f Dockerfile.webhook -t "${REGISTRY}/transactor-webhook:${IMAGE_TAG}" build-temp/
+          docker push "${REGISTRY}/transactor-webhook:${IMAGE_TAG}"
           
           # Tag as latest
-          docker tag "${REGISTRY}/huly-transactor-webhook:${IMAGE_TAG}" "${REGISTRY}/huly-transactor-webhook:latest"
-          docker push "${REGISTRY}/huly-transactor-webhook:latest"
+          docker tag "${REGISTRY}/transactor-webhook:${IMAGE_TAG}" "${REGISTRY}/transactor-webhook:latest"
+          docker push "${REGISTRY}/transactor-webhook:latest"
           
           echo "✅ Webhook-enhanced images built and pushed"
           echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
@@ -292,14 +296,14 @@ jobs:
           ## Webhook-Enhanced Docker Images
           
           This build includes webhook-enhanced Docker images:
-          - **ghcr.io/oculairmedia/huly-transactor-webhook:latest**: Transactor service with circuit breaker
+          - **ghcr.io/oculairmedia/transactor-webhook:latest**: Transactor service with circuit breaker
           - Built from commit: ${{ github.sha }}
           - Registry: GitHub Container Registry (ghcr.io)
           
           To use the enhanced images, update your docker-compose.yml:
           \`\`\`yaml
           transactor:
-            image: ghcr.io/oculairmedia/huly-transactor-webhook:latest
+            image: ghcr.io/oculairmedia/transactor-webhook:latest
             environment:
               - WEBHOOK_ENABLED=true
               - WEBHOOK_CIRCUIT_BREAKER_ENABLED=true
@@ -352,7 +356,7 @@ jobs:
             echo "- Real-time monitoring and analytics"
             echo "- Interactive testing interfaces"
             echo "- HMAC security and event filtering"
-            echo "- **Docker Images**: ghcr.io/oculairmedia/huly-transactor-webhook:latest"
+            echo "- **Docker Images**: ghcr.io/oculairmedia/transactor-webhook:latest"
             echo ""
             echo "### 📦 Deployment:"
             echo "1. Download the deployment artifacts"
