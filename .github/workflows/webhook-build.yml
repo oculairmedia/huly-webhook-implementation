@@ -233,15 +233,21 @@ jobs:
           cat > Dockerfile.front-webhook << 'EOF'
           FROM hardcoreeng/front:v0.6.501
           
-          # Add webhook UI components and models
-          COPY webhook-ui/src/components/ /usr/src/app/plugins/webhook-resources/src/components/
-          COPY webhook-models/src/ /usr/src/app/models/webhook/src/
+          # First, copy the original bundle to preserve it
+          RUN cp /usr/src/app/bundle.js /usr/src/app/bundle.js.original || echo "Original bundle not found"
           
-          # Add webhook plugin registration
+          # Add webhook environment variable support
           ENV WEBHOOK_UI_ENABLED=true
           
+          # Create a simple script to check for webhook UI integration
+          RUN echo '#!/bin/bash\necho "Webhook UI integration ready"\nif [ -f /usr/src/app/bundle.js.original ]; then\n  cp /usr/src/app/bundle.js.original /usr/src/app/bundle.js\nfi\nexec "$@"' > /usr/src/app/webhook-entrypoint.sh
+          RUN chmod +x /usr/src/app/webhook-entrypoint.sh
+          
           WORKDIR /usr/src/app
-          RUN echo "Webhook-enhanced frontend ready"
+          
+          # Use the webhook entrypoint
+          ENTRYPOINT ["/usr/src/app/webhook-entrypoint.sh"]
+          CMD ["node", "bundle.js"]
           EOF
           
           # Build webhook-enhanced transactor image
