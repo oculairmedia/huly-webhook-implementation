@@ -68,7 +68,7 @@ jobs:
       - name: Create test environment
         run: |
           # Create minimal test docker compose for webhook functionality
-          cat > docker compose-test.yml << EOF
+          cat > docker-compose-test.yml << EOF
           version: "3"
           services:
             mongodb:
