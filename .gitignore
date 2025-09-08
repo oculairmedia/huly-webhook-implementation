@@ -1,0 +1,50 @@
+# Environment variables with secrets
+.env
+
+# Node modules
+node_modules/
+npm-debug.log*
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+pids/
+*.pid
+*.seed
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Build outputs
+dist/
+build/
+*.tgz
+
+# Local configuration
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
