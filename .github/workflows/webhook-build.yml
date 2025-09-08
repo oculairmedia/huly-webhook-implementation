@@ -6,9 +6,9 @@ concurrency:
 
 on:
   push:
-    branches: [develop, main, webhook-implementation]
+    branches: [master, main, develop, webhook-implementation]
   pull_request:
-    branches: [develop, main, webhook-implementation]
+    branches: [master, main, develop, webhook-implementation]
   workflow_dispatch:
     inputs:
       deploy_environment:
