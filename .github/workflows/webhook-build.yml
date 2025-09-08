@@ -208,42 +208,57 @@ jobs:
       - name: Build and push webhook-enhanced images
         run: |
           # Build images with webhook implementation
-          # Note: This assumes the webhook implementation is integrated into the base Huly images
-          
-          # For now, we'll tag the standard images with webhook labels
-          # In production, these would be rebuilt with webhook code integrated
-          
           IMAGE_TAG="webhook-${GITHUB_SHA::8}"
           REGISTRY="ghcr.io/oculairmedia"
           
           echo "Building webhook-enhanced images with tag: ${IMAGE_TAG}"
           
-          # Create a simple Dockerfile that extends the base Huly image with webhook config
-          cat > Dockerfile.webhook << 'EOF'
+          # Create Dockerfile for webhook-enhanced transactor
+          cat > Dockerfile.transactor-webhook << 'EOF'
           FROM hardcoreeng/transactor:v0.6.501
           
           # Add webhook configuration and environment
           ENV WEBHOOK_ENABLED=true
           ENV WEBHOOK_CIRCUIT_BREAKER_ENABLED=true
           
-          # Copy webhook implementation (in real scenario, this would be built in)
+          # Copy webhook implementation
           COPY webhook-backend/src/ /usr/src/app/webhook-backend/
           COPY webhook-models/src/ /usr/src/app/webhook-models/
           
-          # Install webhook dependencies
           WORKDIR /usr/src/app
-          RUN echo "Webhook implementation ready"
+          RUN echo "Webhook-enhanced transactor ready"
+          EOF
+          
+          # Create Dockerfile for webhook-enhanced front-end
+          cat > Dockerfile.front-webhook << 'EOF'
+          FROM hardcoreeng/front:v0.6.501
+          
+          # Add webhook UI components and models
+          COPY webhook-ui/src/components/ /usr/src/app/plugins/webhook-resources/src/components/
+          COPY webhook-models/src/ /usr/src/app/models/webhook/src/
+          
+          # Add webhook plugin registration
+          ENV WEBHOOK_UI_ENABLED=true
+          
+          WORKDIR /usr/src/app
+          RUN echo "Webhook-enhanced frontend ready"
           EOF
           
           # Build webhook-enhanced transactor image
-          docker build -f Dockerfile.webhook -t "${REGISTRY}/transactor-webhook:${IMAGE_TAG}" build-temp/
+          docker build -f Dockerfile.transactor-webhook -t "${REGISTRY}/transactor-webhook:${IMAGE_TAG}" build-temp/
           docker push "${REGISTRY}/transactor-webhook:${IMAGE_TAG}"
-          
-          # Tag as latest
           docker tag "${REGISTRY}/transactor-webhook:${IMAGE_TAG}" "${REGISTRY}/transactor-webhook:latest"
           docker push "${REGISTRY}/transactor-webhook:latest"
           
+          # Build webhook-enhanced front-end image  
+          docker build -f Dockerfile.front-webhook -t "${REGISTRY}/front-webhook:${IMAGE_TAG}" build-temp/
+          docker push "${REGISTRY}/front-webhook:${IMAGE_TAG}"
+          docker tag "${REGISTRY}/front-webhook:${IMAGE_TAG}" "${REGISTRY}/front-webhook:latest"
+          docker push "${REGISTRY}/front-webhook:latest"
+          
           echo "✅ Webhook-enhanced images built and pushed"
+          echo "- Transactor: ${REGISTRY}/transactor-webhook:latest"
+          echo "- Frontend: ${REGISTRY}/front-webhook:latest"
           echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
           echo "REGISTRY=${REGISTRY}" >> $GITHUB_ENV
 
@@ -296,7 +311,8 @@ jobs:
           ## Webhook-Enhanced Docker Images
           
           This build includes webhook-enhanced Docker images:
-          - **ghcr.io/oculairmedia/transactor-webhook:latest**: Transactor service with circuit breaker
+          - **ghcr.io/oculairmedia/transactor-webhook:latest**: Transactor with circuit breaker
+          - **ghcr.io/oculairmedia/front-webhook:latest**: Frontend with webhook management UI
           - Built from commit: ${{ github.sha }}
           - Registry: GitHub Container Registry (ghcr.io)
           
@@ -307,6 +323,11 @@ jobs:
             environment:
               - WEBHOOK_ENABLED=true
               - WEBHOOK_CIRCUIT_BREAKER_ENABLED=true
+          
+          front:
+            image: ghcr.io/oculairmedia/front-webhook:latest
+            environment:
+              - WEBHOOK_UI_ENABLED=true
           \`\`\`
           
           ## Features
