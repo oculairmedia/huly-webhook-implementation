@@ -67,8 +67,8 @@ jobs:
 
       - name: Create test environment
         run: |
-          # Create minimal test docker-compose for webhook functionality
-          cat > docker-compose-test.yml << EOF
+          # Create minimal test docker compose for webhook functionality
+          cat > docker compose-test.yml << EOF
           version: "3"
           services:
             mongodb:
@@ -93,9 +93,9 @@ jobs:
 
       - name: Test deployment configuration
         run: |
-          # Validate docker-compose files
-          docker-compose -f docker-compose-webhook.yml config > /dev/null
-          docker-compose -f docker-compose-test.yml config > /dev/null
+          # Validate docker compose files
+          docker compose -f docker compose-webhook.yml config > /dev/null
+          docker compose -f docker compose-test.yml config > /dev/null
           echo "✅ Docker Compose configurations are valid"
 
       - name: Test nginx configuration
@@ -106,30 +106,30 @@ jobs:
 
       - name: Start test services
         run: |
-          docker-compose -f docker-compose-test.yml up -d
+          docker compose -f docker compose-test.yml up -d
           sleep 15
           
           # Check if services are running
-          if docker-compose -f docker-compose-test.yml ps mongodb | grep -q "Up"; then
+          if docker compose -f docker compose-test.yml ps mongodb | grep -q "Up"; then
             echo "✅ MongoDB container started successfully"
           else
             echo "❌ MongoDB container failed to start"
-            docker-compose -f docker-compose-test.yml logs
+            docker compose -f docker compose-test.yml logs
             exit 1
           fi
           
-          if docker-compose -f docker-compose-test.yml ps nginx | grep -q "Up"; then
+          if docker compose -f docker compose-test.yml ps nginx | grep -q "Up"; then
             echo "✅ Nginx container started successfully"  
           else
             echo "❌ Nginx container failed to start"
-            docker-compose -f docker-compose-test.yml logs
+            docker compose -f docker compose-test.yml logs
             exit 1
           fi
 
       - name: Cleanup
         if: always()
         run: |
-          docker-compose -f docker-compose-test.yml down -v
+          docker compose -f docker compose-test.yml down -v
 
   create-deployment-artifact:
     needs: [validate, test-deployment]
@@ -145,7 +145,7 @@ jobs:
           mkdir -p deployment-package
           
           # Copy deployment files
-          cp docker-compose-webhook.yml deployment-package/
+          cp docker compose-webhook.yml deployment-package/
           cp .env.example deployment-package/
           cp .huly.nginx deployment-package/
           cp WEBHOOK-DEPLOYMENT.md deployment-package/
@@ -165,13 +165,13 @@ jobs:
           ## Quick Start
           
           1. Copy \`.env.example\` to \`.env\` and configure your environment
-          2. Run: \`docker-compose -f docker-compose-webhook.yml up -d\`
+          2. Run: \`docker compose -f docker compose-webhook.yml up -d\`
           3. Access Huly at your configured HOST_ADDRESS
           4. Configure webhooks in the admin panel
           
           ## What's Included
           
-          - **docker-compose-webhook.yml**: Deployment configuration
+          - **docker compose-webhook.yml**: Deployment configuration
           - **webhook-models/**: TypeScript models and types
           - **webhook-ui/**: Svelte management components  
           - **webhook-backend/**: Circuit breaker and delivery services
@@ -227,7 +227,7 @@ jobs:
             echo "### 📦 Deployment:"
             echo "1. Download the deployment artifacts"
             echo "2. Extract and configure \`.env\` file"
-            echo "3. Run: \`docker-compose -f docker-compose-webhook.yml up -d\`"
+            echo "3. Run: \`docker compose -f docker compose-webhook.yml up -d\`"
             echo "4. Access webhook management in Huly admin panel"
           else
             echo "❌ **Build Failed!** Check the workflow logs for details"
