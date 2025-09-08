@@ -94,8 +94,8 @@ jobs:
       - name: Test deployment configuration
         run: |
           # Validate docker compose files
-          docker compose -f docker compose-webhook.yml config > /dev/null
-          docker compose -f docker compose-test.yml config > /dev/null
+          docker compose -f "docker compose-webhook.yml" config > /dev/null
+          docker compose -f "docker compose-test.yml" config > /dev/null
           echo "✅ Docker Compose configurations are valid"
 
       - name: Test nginx configuration
@@ -106,30 +106,30 @@ jobs:
 
       - name: Start test services
         run: |
-          docker compose -f docker compose-test.yml up -d
+          docker compose -f "docker compose-test.yml" up -d
           sleep 15
           
           # Check if services are running
-          if docker compose -f docker compose-test.yml ps mongodb | grep -q "Up"; then
+          if docker compose -f "docker compose-test.yml" ps mongodb | grep -q "Up"; then
             echo "✅ MongoDB container started successfully"
           else
             echo "❌ MongoDB container failed to start"
-            docker compose -f docker compose-test.yml logs
+            docker compose -f "docker compose-test.yml" logs
             exit 1
           fi
           
-          if docker compose -f docker compose-test.yml ps nginx | grep -q "Up"; then
+          if docker compose -f "docker compose-test.yml" ps nginx | grep -q "Up"; then
             echo "✅ Nginx container started successfully"  
           else
             echo "❌ Nginx container failed to start"
-            docker compose -f docker compose-test.yml logs
+            docker compose -f "docker compose-test.yml" logs
             exit 1
           fi
 
       - name: Cleanup
         if: always()
         run: |
-          docker compose -f docker compose-test.yml down -v
+          docker compose -f "docker compose-test.yml" down -v
 
   create-deployment-artifact:
     needs: [validate, test-deployment]
@@ -145,7 +145,7 @@ jobs:
           mkdir -p deployment-package
           
           # Copy deployment files
-          cp docker compose-webhook.yml deployment-package/
+          cp "docker compose-webhook.yml" deployment-package/
           cp .env.example deployment-package/
           cp .huly.nginx deployment-package/
           cp WEBHOOK-DEPLOYMENT.md deployment-package/
