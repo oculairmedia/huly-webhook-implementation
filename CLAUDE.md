@@ -260,6 +260,34 @@ When developing custom services:
 - **GitHub**: OAuth and repository integration
 - **Nginx**: Reverse proxy and load balancing
 
+## MCP Version Information
+
+### Current MCP SDK Version
+- **@modelcontextprotocol/sdk**: `^1.16.0` (Latest stable version)
+- **Status**: Working correctly with current implementation
+
+### Huly Platform Dependencies (Version 0.6.500)
+- **@hcengineering/core**: Core platform functionality
+- **@hcengineering/tracker**: Issue and project tracking
+- **@hcengineering/api-client**: API client for Huly platform
+- **@hcengineering/activity**: Activity tracking and notifications
+- **@hcengineering/chunter**: Chat and messaging functionality
+- **@hcengineering/collaborator-client**: Real-time collaboration
+- **@hcengineering/task**: Task management
+- **@hcengineering/rank**: Priority and ranking system
+
+### Version Compatibility Notes
+- All Huly dependencies are aligned at version `0.6.500` for compatibility
+- MCP SDK version `1.16.0` provides stable prompt protocol support
+- Test environment requires proper mocking of `@hcengineering/*` modules
+- Use correct module names in Jest mocks: `@hcengineering/tracker` (not `@huly/tracker`)
+
+### Testing Dependencies
+- **Jest**: `^30.0.4` with ES modules support
+- **Node Options**: `--experimental-vm-modules` required for ES module testing
+- **ESLint**: `^9.31.0` for code linting
+- **Prettier**: `^3.6.2` for code formatting
+
 ## Git Worktree Development Workflow
 
 ### Overview
@@ -403,3 +431,47 @@ The slash commands handle all the complex steps automatically, including:
 - Update Huly status immediately at each stage
 - Use meaningful branch names and commit messages
 - Test thoroughly before creating PRs
+
+## Default Development Practices
+
+### Todo List Management and Testing Requirements
+
+**MANDATORY TESTING BEHAVIOR**: When working on implementation tasks, Claude must create todo lists that include both implementation and testing tasks for each feature or issue. This ensures comprehensive quality assurance.
+
+#### Todo List Structure Pattern:
+```
+1. [Implementation Task] - Build/implement the feature
+2. [Testing Task] - Comprehensive testing before marking complete
+```
+
+#### Testing Requirements Before Completion:
+- **Unit Tests**: All new code must have corresponding unit tests
+- **Integration Tests**: Features must be tested in context
+- **Functional Testing**: End-to-end verification of functionality
+- **Performance Testing**: For performance-critical components
+- **Documentation Testing**: Verify examples and documentation work
+
+#### Quality Gates:
+- ✅ **No task marked complete without passing tests**
+- ✅ **Test coverage must meet minimum thresholds (90%+ preferred)**
+- ✅ **All test scenarios must pass before marking implementation complete**
+- ✅ **Manual testing required for user-facing features**
+
+#### Example Todo Pattern:
+```
+✅ HULLY-XXX: Implement Feature X - Build core functionality
+⏳ Test HULLY-XXX: Verify Feature X works correctly with all edge cases
+✅ HULLY-YYY: Add API Endpoint Y - Create REST endpoint
+⏳ Test HULLY-YYY: Test API endpoint with various inputs and error conditions
+```
+
+#### Testing Validation Checklist:
+- [ ] Unit tests written and passing
+- [ ] Integration tests cover main workflows
+- [ ] Error handling tested with invalid inputs
+- [ ] Performance within acceptable limits
+- [ ] Documentation examples verified
+- [ ] Manual testing completed
+- [ ] Code review requirements met
+
+This pattern ensures robust, reliable code delivery and prevents regressions by mandating comprehensive testing before any task is considered complete.
