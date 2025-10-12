@@ -187,18 +187,28 @@ services:
       - homepage.description=Project management platform
       - homepage.weight=10
   huly-mcp:
-    build: 
+    build:
       context: ./huly-mcp-server
       args:
         GITHUB_TOKEN: ${GITHUB_TOKEN}
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - HULY_URL=http://nginx:80
-      - HULY_PUBLIC_URL=${HULY_PUBLIC_URL:-https://pm.oculair.ca}
+      - LOG_LEVEL=debug
+      - HULY_URL=http://nginx
       - HULY_EMAIL=${HULY_MCP_EMAIL:-emanuvaderland@gmail.com}
       - HULY_PASSWORD=${HULY_MCP_PASSWORD:-k2a8yy7sFWVZ6eL}
       - HULY_WORKSPACE=${HULY_MCP_WORKSPACE:-agentspace}
+      - HULY_MCP_REQUEST_TIMEOUT_MS=60000
+      - HULY_HTTP_KEEPALIVE_MS=120000
+      - HULY_HTTP_HEADERS_TIMEOUT_MS=130000
+      - HULY_HTTP_REQUEST_TIMEOUT_MS=0
+      - HULY_ALLOWED_ORIGINS=${HULY_ALLOWED_ORIGINS:-*}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "3457:3000"
     volumes:
