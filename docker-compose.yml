@@ -228,6 +228,42 @@ services:
       - homepage.href=http://192.168.50.90:3457/health
       - homepage.description=MCP API server for Huly integration
       - homepage.weight=20
+  huly-rest-api:
+    build:
+      context: ./huly-rest-api
+    environment:
+      - NODE_ENV=production
+      - PORT=3458
+      - HULY_URL=https://pm.oculair.ca
+      - HULY_EMAIL=${HULY_MCP_EMAIL:-emanuvaderland@gmail.com}
+      - HULY_PASSWORD=${HULY_MCP_PASSWORD:-k2a8yy7sFWVZ6eL}
+      - HULY_WORKSPACE=${HULY_MCP_WORKSPACE:-agentspace}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "3458:3458"
+    depends_on:
+      - nginx
+      - front
+      - account
+      - transactor
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3458/health', (r) => {let d=''; r.on('data', (c) => d+=c); r.on('end', () => {if(JSON.parse(d).status==='ok') process.exit(0); process.exit(1)})})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - homepage.group=APIs
+      - homepage.name=Huly REST API
+      - homepage.icon=mdi-api
+      - homepage.href=http://192.168.50.90:3458/health
+      - homepage.description=REST API server for Huly platform
+      - homepage.weight=21
 volumes:
   db: null
   elastic: null
