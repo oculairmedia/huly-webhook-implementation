@@ -1,20 +1,61 @@
 name: ${DOCKER_NAME}
 version: "3"
 services:
+  kafka:
+    image: apache/kafka:3.7.0
+    hostname: kafka
+    ports:
+      - 9092:9092
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server
+          localhost:9092 || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
   nginx:
     image: nginx:1.21.3
     ports:
-      - ${HTTP_BIND}:${HTTP_PORT}:80
+      - "8101:80"
     volumes:
       - ./.huly.nginx:/etc/nginx/conf.d/default.conf
     restart: unless-stopped
-  mongodb:
-    image: mongo:7-jammy
-    environment:
-      - PUID=1000
-      - PGID=1000
+  cockroachdb:
+    image: cockroachdb/cockroach:v23.1.11
+    command: start-single-node --insecure
     volumes:
-      - db:/data/db
+      - cockroach_data:/cockroach/cockroach-data
+    ports:
+      - 26257:26257
+      - 8090:8080
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -f
+        - http://localhost:8080/health?ready=1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
   minio:
     image: minio/minio
@@ -27,7 +68,6 @@ services:
     command: >
       /bin/sh -c "./bin/elasticsearch-plugin list | grep -q ingest-attachment ||
       yes | ./bin/elasticsearch-plugin install --silent ingest-attachment;
-
       /usr/local/bin/docker-entrypoint.sh eswrapper"
     volumes:
       - elastic:/usr/share/elasticsearch/data
@@ -53,22 +93,25 @@ services:
           memory: 500M
     restart: unless-stopped
   transactor:
-    image: ghcr.io/oculairmedia/transactor-webhook:latest
+    image: hardcoreeng/transactor:${HULY_VERSION}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cockroachdb:
+        condition: service_started
     environment:
       - SERVER_PORT=3333
       - SERVER_SECRET=${SECRET}
       - SERVER_CURSOR_MAXTIMEMS=30000
-      - DB_URL=mongodb://mongodb:27017
-      - MONGO_URL=mongodb://mongodb:27017
+      - DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
+      - MONGO_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
       - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
-      - FRONT_URL=http://localhost:8087
+      - FRONT_URL=http${SECURE:+s}://${HOST_ADDRESS}
       - ACCOUNTS_URL=http://account:3000
       - FULLTEXT_URL=http://fulltext:4700
       - STATS_URL=http://stats:4900
       - LAST_NAME_FIRST=${LAST_NAME_FIRST:-true}
-      # Webhook-specific configuration
-      - WEBHOOK_ENABLED=true
-      - WEBHOOK_CIRCUIT_BREAKER_ENABLED=true
+      - QUEUE_CONFIG=kafka:9092
     restart: unless-stopped
   collaborator:
     image: hardcoreeng/collaborator:${HULY_VERSION}
@@ -76,38 +119,43 @@ services:
       - COLLABORATOR_PORT=3078
       - SECRET=${SECRET}
       - ACCOUNTS_URL=http://account:3000
-      - DB_URL=mongodb://mongodb:27017
+      - DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
       - STATS_URL=http://stats:4900
       - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
+      # - PROCEED_V7_MONGO=true # Not needed with CockroachDB
     restart: unless-stopped
   account:
     image: hardcoreeng/account:${HULY_VERSION}
     environment:
       - SERVER_PORT=3000
       - SERVER_SECRET=${SECRET}
-      - DB_URL=mongodb://mongodb:27017
-      - MONGO_URL=mongodb://mongodb:27017
+      - DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
       - TRANSACTOR_URL=ws://transactor:3333;ws${SECURE:+s}://${HOST_ADDRESS}/_transactor
       - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
-      - FRONT_URL=http://front:8080
+      - FRONT_URL=http${SECURE:+s}://${HOST_ADDRESS}
       - STATS_URL=http://stats:4900
       - MODEL_ENABLED=*
       - ACCOUNTS_URL=http${SECURE:+s}://${HOST_ADDRESS}/_accounts
       - ACCOUNT_PORT=3000
-      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
-      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
+      - QUEUE_CONFIG=kafka:9092
     restart: unless-stopped
   workspace:
     image: hardcoreeng/workspace:${HULY_VERSION}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cockroachdb:
+        condition: service_started
     environment:
       - SERVER_SECRET=${SECRET}
-      - DB_URL=mongodb://mongodb:27017
-      - MONGO_URL=mongodb://mongodb:27017
+      - DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
       - TRANSACTOR_URL=ws://transactor:3333;ws${SECURE:+s}://${HOST_ADDRESS}/_transactor
       - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
       - MODEL_ENABLED=*
       - ACCOUNTS_URL=http://account:3000
+      - ACCOUNTS_DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
       - STATS_URL=http://stats:4900
+      - QUEUE_CONFIG=kafka:9092
     restart: unless-stopped
   front:
     image: hardcoreeng/front:${HULY_VERSION}
@@ -116,6 +164,7 @@ services:
       - SERVER_SECRET=${SECRET}
       - LOVE_ENDPOINT=http${SECURE:+s}://${HOST_ADDRESS}/_love
       - ACCOUNTS_URL=http${SECURE:+s}://${HOST_ADDRESS}/_accounts
+      - ACCOUNTS_URL_INTERNAL=http://account:3000
       - REKONI_URL=http${SECURE:+s}://${HOST_ADDRESS}/_rekoni
       - CALENDAR_URL=http${SECURE:+s}://${HOST_ADDRESS}/_calendar
       - GMAIL_URL=http${SECURE:+s}://${HOST_ADDRESS}/_gmail
@@ -125,29 +174,26 @@ services:
       - ELASTIC_URL=http://elastic:9200
       - COLLABORATOR_URL=ws${SECURE:+s}://${HOST_ADDRESS}/_collaborator
       - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
-      - DB_URL=mongodb://mongodb:27017
-      - MONGO_URL=mongodb://mongodb:27017
-      - TITLE=${TITLE:-Huly Self Host}
+      - TITLE=${TITLE:-Huly Test}
       - DEFAULT_LANGUAGE=${DEFAULT_LANGUAGE:-en}
       - LAST_NAME_FIRST=${LAST_NAME_FIRST:-true}
       - DESKTOP_UPDATES_CHANNEL=selfhost
       - GITHUB_APP=${GITHUB_APP}
       - GITHUB_CLIENTID=${GITHUB_APP_CLIENT_ID}
       - GITHUB_URL=http${SECURE:+s}://${HOST_ADDRESS}/_github
-      # Webhook UI configuration
-      - WEBHOOK_UI_ENABLED=true
     restart: unless-stopped
   fulltext:
     image: hardcoreeng/fulltext:${HULY_VERSION}
     environment:
       - SERVER_SECRET=${SECRET}
-      - DB_URL=mongodb://mongodb:27017
+      - DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
       - FULLTEXT_DB_URL=http://elastic:9200
       - ELASTIC_INDEX_NAME=huly_storage_index
       - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
       - REKONI_URL=http://rekoni:4004
       - ACCOUNTS_URL=http://account:3000
       - STATS_URL=http://stats:4900
+      # - PROCEED_V7_MONGO=true # Not needed with CockroachDB
     restart: unless-stopped
   stats:
     image: hardcoreeng/stats:${HULY_VERSION}
@@ -157,6 +203,9 @@ services:
     restart: unless-stopped
   github:
     image: hardcoreeng/github:${HULY_VERSION}
+    depends_on:
+      kafka:
+        condition: service_healthy
     environment:
       - PORT=3500
       - ACCOUNTS_URL=http${SECURE:+s}://${HOST_ADDRESS}/_accounts
@@ -170,49 +219,35 @@ services:
       - WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
       - BOT_NAME=${GITHUB_BOT_NAME}
       - COLLABORATOR_URL=ws${SECURE:+s}://${HOST_ADDRESS}/_collaborator
-      - MONGO_URL=mongodb://mongodb:27017
-      - DB_URL=mongodb://mongodb:27017
+      - MONGO_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
+      - DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
       - MINIO_ENDPOINT=minio
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - ELASTIC_URL=http://elastic:9200
       - REKONI_URL=http://rekoni:4004
       - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
+      - QUEUE_CONFIG=kafka:9092
     restart: unless-stopped
-    labels:
-      - homepage.group=Productivity
-      - homepage.name=Huly
-      - homepage.icon=
-      - homepage.href=https://pm.oculair.ca/
-      - homepage.description=Project management platform
-      - homepage.weight=10
   huly-mcp:
-    build:
-      context: ./huly-mcp-server
-      args:
-        GITHUB_TOKEN: ${GITHUB_TOKEN}
+    image: huly-huly-mcp:latest
+    ports:
+      - 3457:3000
     environment:
       - NODE_ENV=production
       - PORT=3000
       - LOG_LEVEL=debug
       - HULY_URL=http://nginx
-      - HULY_EMAIL=${HULY_MCP_EMAIL:-emanuvaderland@gmail.com}
-      - HULY_PASSWORD=${HULY_MCP_PASSWORD:-k2a8yy7sFWVZ6eL}
-      - HULY_WORKSPACE=${HULY_MCP_WORKSPACE:-agentspace}
+      - HULY_PUBLIC_URL=http${SECURE:+s}://${HOST_ADDRESS}
+      - HULY_EMAIL=${HULY_MCP_EMAIL}
+      - HULY_PASSWORD=${HULY_MCP_PASSWORD}
+      - HULY_WORKSPACE=${HULY_MCP_WORKSPACE}
       - HULY_MCP_REQUEST_TIMEOUT_MS=60000
       - HULY_HTTP_KEEPALIVE_MS=120000
       - HULY_HTTP_HEADERS_TIMEOUT_MS=130000
       - HULY_HTTP_REQUEST_TIMEOUT_MS=0
-      - HULY_ALLOWED_ORIGINS=${HULY_ALLOWED_ORIGINS:-*}
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    ports:
-      - "3457:3000"
+      - HULY_ALLOWED_ORIGINS=*
     volumes:
-      # Development bind mount for code changes without rebuilding
       - ./huly-mcp-server/index.js:/app/index.js:ro
       - ./huly-mcp-server/src:/app/src:ro
     depends_on:
@@ -221,51 +256,35 @@ services:
       - account
       - transactor
     restart: unless-stopped
-    labels:
-      - homepage.group=APIs
-      - homepage.name=Huly MCP Server
-      - homepage.icon=mdi-api
-      - homepage.href=http://192.168.50.90:3457/health
-      - homepage.description=MCP API server for Huly integration
-      - homepage.weight=20
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
   huly-rest-api:
-    build:
-      context: ./huly-rest-api
+    image: huly-huly-rest-api:latest
+    ports:
+      - 3458:3458
     environment:
       - NODE_ENV=production
       - PORT=3458
-      - HULY_URL=https://pm.oculair.ca
-      - HULY_EMAIL=${HULY_MCP_EMAIL:-emanuvaderland@gmail.com}
-      - HULY_PASSWORD=${HULY_MCP_PASSWORD:-k2a8yy7sFWVZ6eL}
-      - HULY_WORKSPACE=${HULY_MCP_WORKSPACE:-agentspace}
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    ports:
-      - "3458:3458"
+      - HULY_URL=http://nginx
+      - HULY_EMAIL=${HULY_MCP_EMAIL}
+      - HULY_PASSWORD=${HULY_MCP_PASSWORD}
+      - HULY_WORKSPACE=${HULY_MCP_WORKSPACE}
     depends_on:
       - nginx
-      - front
       - account
       - transactor
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3458/health', (r) => {let d=''; r.on('data', (c) => d+=c); r.on('end', () => {if(JSON.parse(d).status==='ok') process.exit(0); process.exit(1)})})"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    labels:
-      - homepage.group=APIs
-      - homepage.name=Huly REST API
-      - homepage.icon=mdi-api
-      - homepage.href=http://192.168.50.90:3458/health
-      - homepage.description=REST API server for Huly platform
-      - homepage.weight=21
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 volumes:
-  db: null
+  cockroach_data: null
   elastic: null
   files: null
+  kafka_data: null
 networks: {}

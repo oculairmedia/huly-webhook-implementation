@@ -12,7 +12,6 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host pm.oculair.ca;
         proxy_pass http://front:8080;
     }
 
@@ -21,31 +20,16 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host pm.oculair.ca;
 
         rewrite ^/_accounts(/.*)$ $1 break;
         proxy_pass http://account:3000/;
     }
-
-    #location /_love {
-    #    proxy_set_header Host $host;
-    #    proxy_set_header X-Real-IP $remote_addr;
-    #    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    #    proxy_set_header X-Forwarded-Proto $scheme;
-
-    #    proxy_http_version 1.1;
-    #    proxy_set_header Upgrade $http_upgrade;
-    #    proxy_set_header Connection "upgrade";
-    #    rewrite ^/_love(/.*)$ $1 break;
-    #    proxy_pass http://love:8096/;
-    #}
 
     location /_collaborator {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host pm.oculair.ca;
 
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -59,7 +43,6 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host pm.oculair.ca;
         
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -73,7 +56,6 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host pm.oculair.ca;
         
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -86,7 +68,6 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host pm.oculair.ca;
 
         rewrite ^/_rekoni(/.*)$ $1 break;
         proxy_pass http://rekoni:4004/;
@@ -97,21 +78,58 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host pm.oculair.ca;
 
         rewrite ^/_stats(/.*)$ $1 break;
         proxy_pass http://stats:4900/;
     }
 
-    location /_github {
+    #location /_github {
+    #    proxy_set_header Host $host;
+    #    proxy_set_header X-Real-IP $remote_addr;
+    #    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    #    proxy_set_header X-Forwarded-Proto $scheme;
+    #
+    #    rewrite ^/_github(/.*)$ $1 break;
+    #    proxy_pass http://github:3500/;
+    #}
+
+    # MCP Server endpoint for external infrastructure
+    location /mcp {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host pm.oculair.ca;
-
-        rewrite ^/_github(/.*)$ $1 break;
-        proxy_pass http://github:3500/;
+        
+        # Enable CORS for external services
+        add_header 'Access-Control-Allow-Origin' '*' always;
+        add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+        add_header 'Access-Control-Allow-Headers' 'Content-Type, Authorization' always;
+        
+        if ($request_method = 'OPTIONS') {
+            return 204;
+        }
+        
+        rewrite ^/mcp(.*)$ $1 break;
+        proxy_pass http://huly-mcp:3000;
     }
 
+    # REST API endpoint (disabled - authentication issue with v0.7)
+    #location /api {
+    #    proxy_set_header Host $host;
+    #    proxy_set_header X-Real-IP $remote_addr;
+    #    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    #    proxy_set_header X-Forwarded-Proto https;
+    #    
+    #    # Enable CORS for external services
+    #    add_header 'Access-Control-Allow-Origin' '*' always;
+    #    add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
+    #    add_header 'Access-Control-Allow-Headers' 'Content-Type, Authorization' always;
+    #    
+    #    if ($request_method = 'OPTIONS') {
+    #        return 204;
+    #    }
+    #    
+    #    rewrite ^/api(/.*)$ $1 break;
+    #    proxy_pass http://huly-rest-api:3458/api/;
+    #}
 }
