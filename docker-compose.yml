@@ -115,6 +115,13 @@ services:
     restart: unless-stopped
   collaborator:
     image: hardcoreeng/collaborator:${HULY_VERSION}
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+      account:
+        condition: service_started
+      stats:
+        condition: service_started
     environment:
       - COLLABORATOR_PORT=3078
       - SECRET=${SECRET}
@@ -126,6 +133,13 @@ services:
     restart: unless-stopped
   account:
     image: hardcoreeng/account:${HULY_VERSION}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cockroachdb:
+        condition: service_healthy
+      stats:
+        condition: service_started
     environment:
       - SERVER_PORT=3000
       - SERVER_SECRET=${SECRET}
@@ -184,6 +198,17 @@ services:
     restart: unless-stopped
   fulltext:
     image: hardcoreeng/fulltext:${HULY_VERSION}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cockroachdb:
+        condition: service_healthy
+      elastic:
+        condition: service_healthy
+      account:
+        condition: service_started
+      stats:
+        condition: service_started
     environment:
       - SERVER_SECRET=${SECRET}
       - DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
@@ -193,6 +218,7 @@ services:
       - REKONI_URL=http://rekoni:4004
       - ACCOUNTS_URL=http://account:3000
       - STATS_URL=http://stats:4900
+      - QUEUE_CONFIG=kafka:9092
       # - PROCEED_V7_MONGO=true # Not needed with CockroachDB
     restart: unless-stopped
   stats:
@@ -273,9 +299,14 @@ services:
       - HULY_PASSWORD=${HULY_MCP_PASSWORD}
       - HULY_WORKSPACE=${HULY_MCP_WORKSPACE}
     depends_on:
-      - nginx
-      - account
-      - transactor
+      nginx:
+        condition: service_started
+      account:
+        condition: service_started
+      transactor:
+        condition: service_started
+      front:
+        condition: service_started
     restart: unless-stopped
     logging:
       driver: json-file

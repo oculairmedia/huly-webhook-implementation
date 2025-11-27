@@ -36,30 +36,69 @@ const config = {
 let hulyClient = null;
 
 /**
- * Initialize Huly client connection
+ * Initialize Huly client connection with retry logic
  */
 async function initializeClient() {
-  try {
-    console.log('[Huly REST] Connecting to Huly platform...');
-    console.log(`[Huly REST] URL: ${config.hulyUrl}`);
-    console.log(`[Huly REST] Workspace: ${config.workspace}`);
+  const maxAttempts = 10;
+  const initialDelay = 3000;
+  const backoffFactor = 1.5;
+  const maxDelay = 15000;
+  
+  // Wait for services to be ready on initial startup
+  console.log('[Huly REST] Waiting 10s for services to initialize...');
+  await new Promise(resolve => setTimeout(resolve, 10000));
+  
+  let retryCount = 0;
+  
+  while (retryCount < maxAttempts) {
+    try {
+      console.log('[Huly REST] ========================================');
+      console.log('[Huly REST] Connection attempt', retryCount + 1, 'of', maxAttempts);
+      console.log('[Huly REST] URL:', config.hulyUrl);
+      console.log('[Huly REST] Email:', config.email);
+      console.log('[Huly REST] Workspace:', config.workspace);
+      console.log('[Huly REST] ========================================');
 
-    // Connect to the platform using the SDK
-    hulyClient = await connect(config.hulyUrl, {
-      email: config.email,
-      password: config.password,
-      workspace: config.workspace,
-      socketFactory: (url) => {
-        console.log('[Huly REST] WebSocket connecting to:', url);
-        return new WebSocket(url);
-      },
-    });
+      // Connect to the platform using the SDK
+      console.log('[Huly REST] Calling connect() from @hcengineering/api-client...');
+      hulyClient = await connect(config.hulyUrl, {
+        email: config.email,
+        password: config.password,
+        workspace: config.workspace,
+        socketFactory: (url) => {
+          console.log('[Huly REST] WebSocket connecting to:', url);
+          return new WebSocket(url);
+        },
+      });
 
-    console.log('[Huly REST] ✅ Successfully connected to Huly platform');
-    return true;
-  } catch (error) {
-    console.error('[Huly REST] ❌ Failed to connect to Huly:', error.message);
-    throw error;
+      console.log('[Huly REST] ✅ Successfully connected to Huly platform');
+      
+      // Verify connection works
+      console.log('[Huly REST] Verifying connection...');
+      const testProjects = await hulyClient.findAll(tracker.class.Project, {}, { limit: 1 });
+      console.log('[Huly REST] ✅ Connection verified, found', testProjects.length, 'test project(s)');
+      
+      return true;
+    } catch (error) {
+      retryCount++;
+      console.error('[Huly REST] ❌ Connection attempt failed:', error.message);
+      console.error('[Huly REST] Error name:', error.name);
+      console.error('[Huly REST] Error stack:', error.stack?.split('\n').slice(0, 5));
+      
+      if (retryCount >= maxAttempts) {
+        console.error('[Huly REST] ❌ All connection attempts failed');
+        throw error;
+      }
+      
+      // Calculate delay with exponential backoff
+      const delay = Math.min(
+        initialDelay * Math.pow(backoffFactor, retryCount - 1),
+        maxDelay
+      );
+      
+      console.log(`[Huly REST] Retrying in ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
   }
 }
 
@@ -547,6 +586,82 @@ app.put('/api/issues/:identifier', async (req, res) => {
     });
   } catch (error) {
     console.error('[Huly REST] Error updating issue:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Update a project's name or description
+ * PUT /api/projects/:identifier
+ * Body: { field: 'name' | 'description', value: string }
+ * OR: { name: string, description: string } (update both at once)
+ */
+app.put('/api/projects/:identifier', async (req, res) => {
+  try {
+    if (!hulyClient) {
+      return res.status(503).json({ error: 'Huly client not initialized' });
+    }
+
+    const { identifier } = req.params;
+    const { field, value, name, description } = req.body;
+
+    // Find project
+    const project = await hulyClient.findOne(tracker.class.Project, { identifier });
+    if (!project) {
+      return res.status(404).json({ error: `Project ${identifier} not found` });
+    }
+
+    const updateData = {};
+    const updatedFields = [];
+
+    // Support both styles: { field, value } or { name, description }
+    if (field && value !== undefined) {
+      // Single field update
+      if (field === 'name') {
+        updateData.name = value;
+        updatedFields.push('name');
+      } else if (field === 'description') {
+        updateData.description = value;
+        updatedFields.push('description');
+      } else {
+        return res.status(400).json({
+          error: `Field '${field}' not supported`,
+          supportedFields: ['name', 'description'],
+        });
+      }
+    } else {
+      // Bulk update style
+      if (name !== undefined) {
+        updateData.name = name;
+        updatedFields.push('name');
+      }
+      if (description !== undefined) {
+        updateData.description = description;
+        updatedFields.push('description');
+      }
+    }
+
+    // Validate we have something to update
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({
+        error: 'No valid fields to update',
+        hint: 'Provide either { field, value } or { name, description }',
+      });
+    }
+
+    // Apply update
+    await hulyClient.updateDoc(tracker.class.Project, core.space.Space, project._id, updateData);
+
+    console.log(`[Huly REST] Updated project ${identifier}:`, updatedFields.join(', '));
+
+    res.json({
+      identifier,
+      updatedFields,
+      updates: updateData,
+      success: true,
+    });
+  } catch (error) {
+    console.error('[Huly REST] Error updating project:', error);
     res.status(500).json({ error: error.message });
   }
 });
