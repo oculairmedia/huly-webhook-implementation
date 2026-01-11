@@ -104,7 +104,7 @@ docker-compose up -d --no-deps <service_name>
 ### Key Environment Variables (.env)
 
 **Core Configuration:**
-- `HULY_VERSION`: Platform version (currently v0.6.501)
+- `HULY_VERSION`: Platform version (currently v0.7.x)
 - `HOST_ADDRESS`: External host address (pm.oculair.ca)
 - `SECURE`: SSL/TLS enablement (true/false)
 - `HTTP_PORT`: External HTTP port (8101)
@@ -230,7 +230,7 @@ cp docker-compose.yml docker-compose.yml.backup
 
 ### Version Compatibility
 
-The deployment uses Huly version v0.6.501 across all services. The MCP server uses SDK version 0.6.500 for compatibility. Version alignment is critical for proper operation.
+The deployment uses Huly version v0.7.x across all services. The MCP server uses SDK version 0.7.x for compatibility. Version alignment is critical for proper operation.
 
 ## Development Integration
 
@@ -266,7 +266,7 @@ When developing custom services:
 - **@modelcontextprotocol/sdk**: `^1.16.0` (Latest stable version)
 - **Status**: Working correctly with current implementation
 
-### Huly Platform Dependencies (Version 0.6.500)
+### Huly Platform Dependencies (Version 0.7.x)
 - **@hcengineering/core**: Core platform functionality
 - **@hcengineering/tracker**: Issue and project tracking
 - **@hcengineering/api-client**: API client for Huly platform
@@ -277,7 +277,7 @@ When developing custom services:
 - **@hcengineering/rank**: Priority and ranking system
 
 ### Version Compatibility Notes
-- All Huly dependencies are aligned at version `0.6.500` for compatibility
+- All Huly dependencies are aligned at version `0.7.x` for compatibility
 - MCP SDK version `1.16.0` provides stable prompt protocol support
 - Test environment requires proper mocking of `@hcengineering/*` modules
 - Use correct module names in Jest mocks: `@hcengineering/tracker` (not `@huly/tracker`)
@@ -475,3 +475,64 @@ The slash commands handle all the complex steps automatically, including:
 - [ ] Code review requirements met
 
 This pattern ensures robust, reliable code delivery and prevents regressions by mandating comprehensive testing before any task is considered complete.
+
+## Known Issues and Fixes
+
+### "targetParents is not iterable" Error (Fixed 2025-12-26)
+
+**Symptom**: Transactor logs show repeated errors:
+```
+TypeError: targetParents is not iterable
+    at updateIssueParentEstimations
+    at Object.OnIssueUpdate [as op]
+```
+
+**Root Cause**: Sub-issues created via REST API (e.g., by vibesync) have `attachedTo` set to a parent issue ID but `parents` field is `NULL` instead of an array. When any update triggers `OnIssueUpdate`, it tries to iterate over `issue.parents` which fails.
+
+**Diagnosis Query**:
+```sql
+-- Find affected issues
+SELECT COUNT(*) as affected_count
+FROM task
+WHERE "workspaceId" = '<your-workspace-id>'
+  AND _class = 'tracker:class:Issue'
+  AND (
+    data->>'parents' IS NULL 
+    OR data->>'parents' = 'null'
+    OR data->>'parents' = ''
+  )
+  AND "attachedTo" != 'tracker:ids:NoParent';
+```
+
+**Fix Query**:
+```sql
+-- Populate parents array with parent info
+UPDATE task AS t1
+SET data = jsonb_set(
+  t1.data, 
+  '{parents}', 
+  (
+    SELECT jsonb_build_array(
+      jsonb_build_object(
+        'parentId', t2._id,
+        'parentTitle', t2.data->>'title',
+        'space', t2.space,
+        'identifier', t2.data->>'identifier'
+      )
+    )
+    FROM task t2
+    WHERE t2._id = t1."attachedTo"
+      AND t2."workspaceId" = t1."workspaceId"
+  )::jsonb
+)
+WHERE t1."workspaceId" = '<your-workspace-id>'
+  AND t1._class = 'tracker:class:Issue'
+  AND (
+    t1.data->>'parents' IS NULL 
+    OR t1.data->>'parents' = 'null'
+    OR t1.data->>'parents' = ''
+  )
+  AND t1."attachedTo" != 'tracker:ids:NoParent';
+```
+
+**Prevention**: When creating sub-issues via API, ensure the `parents` field is populated with the parent hierarchy information.
