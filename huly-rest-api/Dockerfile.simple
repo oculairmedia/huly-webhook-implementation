@@ -1,0 +1,45 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apk add --no-cache python3 make g++ git
+
+# Copy package files
+COPY package.json ./
+
+# Build argument for GitHub token (needed for @hcengineering packages)
+ARG GITHUB_TOKEN
+ENV GITHUB_TOKEN=${GITHUB_TOKEN}
+
+# Configure npm to use GitHub token for @hcengineering packages
+RUN echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" > ~/.npmrc && \
+    echo "@hcengineering:registry=https://npm.pkg.github.com" >> ~/.npmrc
+
+# Install ALL dependencies fresh
+RUN npm install --production --legacy-peer-deps && \
+    rm ~/.npmrc
+
+# Copy application code
+COPY server.js ./
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001 && \
+    chown -R nodejs:nodejs /app
+
+USER nodejs
+
+# Expose port
+EXPOSE 3458
+
+# Set default environment variables
+ENV NODE_ENV=production
+ENV PORT=3458
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:3458/health', (r) => {let d=''; r.on('data', (c) => d+=c); r.on('end', () => {try{if(JSON.parse(d).connected) process.exit(0)}catch(e){}; process.exit(1)})})"
+
+# Start server
+CMD ["node", "server.js"]

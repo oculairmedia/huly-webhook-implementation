@@ -1,0 +1,484 @@
+/**
+ * Letta Meta-Tools Plugin for OpenCode
+ *
+ * Provides high-level meta-tools that wrap complex Letta MCP operations
+ * into simple, intuitive interfaces for AI agents.
+ */
+
+import { tool } from "@opencode-ai/plugin"
+
+export const LettaMetaToolsPlugin = async (ctx) => {
+  const LETTA_MCP_BASE_URL = process.env.LETTA_MCP_BASE_URL || "http://192.168.50.90:3001"
+
+  /**
+   * Make a JSON-RPC call to the Letta MCP server
+   */
+  async function callMcpTool(toolName, args = {}) {
+    const response = await fetch(`${LETTA_MCP_BASE_URL}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: toolName,
+          arguments: args
+        },
+        id: Date.now()
+      })
+    })
+
+    const result = await response.json()
+
+    if (result.error) {
+      throw new Error(`MCP Error: ${result.error.message}`)
+    }
+
+    return result.result
+  }
+
+  console.log(`[Letta Meta-Tools] Plugin loaded for ${ctx.project?.name || 'unknown'}`)
+
+  return {
+    tool: {
+      // ==================================================================
+      // AGENT MANAGEMENT META-TOOLS
+      // ==================================================================
+
+      letta_agent_manager: tool({
+        description: "Comprehensive agent management - create, list, retrieve, modify, or delete Letta agents. Action: create|list|get|modify|delete|clone",
+        args: {
+          action: tool.schema.string(),
+          agent_id: tool.schema.string(),
+          name: tool.schema.string(),
+          system_prompt: tool.schema.string(),
+          llm_model: tool.schema.string(),
+          embedding_model: tool.schema.string(),
+          new_name: tool.schema.string()
+        },
+        async execute(args, ctx) {
+          try {
+            let result
+            switch (args.action) {
+              case 'list':
+                result = await callMcpTool('list_agents')
+                break
+
+              case 'get':
+                if (!args.agent_id) throw new Error("agent_id required for get action")
+                result = await callMcpTool('retrieve_agent', { agent_id: args.agent_id })
+                break
+
+              case 'create':
+                if (!args.name) throw new Error("name required for create action")
+                const createParams = {
+                  name: args.name,
+                  llm_config: args.llm_model ? { model: args.llm_model } : undefined,
+                  embedding_config: args.embedding_model ? { model: args.embedding_model } : undefined
+                }
+                if (args.system_prompt) createParams.system = args.system_prompt
+                result = await callMcpTool('create_agent', createParams)
+                break
+
+              case 'modify':
+                if (!args.agent_id) throw new Error("agent_id required for modify action")
+                const modifyParams = { agent_id: args.agent_id }
+                if (args.name) modifyParams.name = args.name
+                if (args.system_prompt) modifyParams.system = args.system_prompt
+                if (args.llm_model) modifyParams.llm_config = { model: args.llm_model }
+                result = await callMcpTool('modify_agent', modifyParams)
+                break
+
+              case 'delete':
+                if (!args.agent_id) throw new Error("agent_id required for delete action")
+                result = await callMcpTool('delete_agent', { agent_id: args.agent_id })
+                break
+
+              case 'clone':
+                if (!args.agent_id) throw new Error("agent_id required for clone action")
+                result = await callMcpTool('clone_agent', {
+                  agent_id: args.agent_id,
+                  new_name: args.new_name || `${args.agent_id}_clone`
+                })
+                break
+
+              default:
+                throw new Error(`Unknown action: ${args.action}`)
+            }
+
+            return JSON.stringify(result, null, 2)
+          } catch (error) {
+            return JSON.stringify({ error: error.message }, null, 2)
+          }
+        }
+      }),
+
+      letta_chat: tool({
+        description: "Send a message to a Letta agent and get a response (simplified conversation interface)",
+        args: {
+          agent_id: tool.schema.string(),
+          message: tool.schema.string(),
+          include_summary: tool.schema.boolean()
+        },
+        async execute(args, ctx) {
+          try {
+            // Send message to agent
+            const response = await callMcpTool('prompt_agent', {
+              agent_id: args.agent_id,
+              message: args.message
+            })
+
+            // Optionally get agent summary for context
+            if (args.include_summary) {
+              const summary = await callMcpTool('get_agent_summary', {
+                agent_id: args.agent_id
+              })
+
+              return JSON.stringify({ response, summary }, null, 2)
+            }
+
+            return JSON.stringify(response, null, 2)
+          } catch (error) {
+            return JSON.stringify({ error: error.message }, null, 2)
+          }
+        }
+      }),
+
+      // ==================================================================
+      // MEMORY MANAGEMENT META-TOOLS
+      // ==================================================================
+
+      letta_memory_manager: tool({
+        description: "Manage agent memory blocks - list, read, create, update, or attach memory to agents. Action: list|read|create|update|attach",
+        args: {
+          action: tool.schema.string(),
+          agent_id: tool.schema.string(),
+          block_id: tool.schema.string(),
+          label: tool.schema.string(),
+          value: tool.schema.string(),
+          template: tool.schema.string()
+        },
+        async execute(args, ctx) {
+          try {
+            let result
+            switch (args.action) {
+              case 'list':
+                if (!args.agent_id) throw new Error("agent_id required for list action")
+                result = await callMcpTool('list_memory_blocks', { agent_id: args.agent_id })
+                break
+
+              case 'read':
+                if (!args.block_id) throw new Error("block_id required for read action")
+                result = await callMcpTool('read_memory_block', { block_id: args.block_id })
+                break
+
+              case 'create':
+                if (!args.label || !args.value) {
+                  throw new Error("label and value required for create action")
+                }
+                result = await callMcpTool('create_memory_block', {
+                  label: args.label,
+                  value: args.value,
+                  template_name: args.template
+                })
+                break
+
+              case 'update':
+                if (!args.block_id || !args.value) {
+                  throw new Error("block_id and value required for update action")
+                }
+                result = await callMcpTool('update_memory_block', {
+                  block_id: args.block_id,
+                  value: args.value
+                })
+                break
+
+              case 'attach':
+                if (!args.agent_id || !args.block_id) {
+                  throw new Error("agent_id and block_id required for attach action")
+                }
+                result = await callMcpTool('attach_memory_block', {
+                  agent_id: args.agent_id,
+                  block_id: args.block_id
+                })
+                break
+
+              default:
+                throw new Error(`Unknown action: ${args.action}`)
+            }
+
+            return JSON.stringify(result, null, 2)
+          } catch (error) {
+            return JSON.stringify({ error: error.message }, null, 2)
+          }
+        }
+      }),
+
+      // ==================================================================
+      // TOOL MANAGEMENT META-TOOLS
+      // ==================================================================
+
+      letta_tool_manager: tool({
+        description: "Manage agent tools - list, attach, bulk attach, or upload custom tools. Action: list|attach|bulk_attach|upload",
+        args: {
+          action: tool.schema.string(),
+          agent_id: tool.schema.string(),
+          tool_id: tool.schema.string(),
+          agent_ids: tool.schema.string(),
+          tool_name: tool.schema.string(),
+          tool_code: tool.schema.string()
+        },
+        async execute(args, ctx) {
+          try {
+            let result
+            switch (args.action) {
+              case 'list':
+                if (!args.agent_id) throw new Error("agent_id required for list action")
+                result = await callMcpTool('list_agent_tools', { agent_id: args.agent_id })
+                break
+
+              case 'attach':
+                if (!args.agent_id || !args.tool_id) {
+                  throw new Error("agent_id and tool_id required for attach action")
+                }
+                result = await callMcpTool('attach_tool', {
+                  agent_id: args.agent_id,
+                  tool_id: args.tool_id
+                })
+                break
+
+              case 'bulk_attach':
+                if (!args.agent_ids || !args.tool_id) {
+                  throw new Error("agent_ids and tool_id required for bulk_attach action")
+                }
+                result = await callMcpTool('bulk_attach_tool_to_agents', {
+                  agent_ids: args.agent_ids.split(',').map(id => id.trim()),
+                  tool_id: args.tool_id
+                })
+                break
+
+              case 'upload':
+                if (!args.tool_name || !args.tool_code) {
+                  throw new Error("tool_name and tool_code required for upload action")
+                }
+                result = await callMcpTool('upload_tool', {
+                  name: args.tool_name,
+                  source_code: args.tool_code
+                })
+                break
+
+              default:
+                throw new Error(`Unknown action: ${args.action}`)
+            }
+
+            return JSON.stringify(result, null, 2)
+          } catch (error) {
+            return JSON.stringify({ error: error.message }, null, 2)
+          }
+        }
+      }),
+
+      // ==================================================================
+      // KNOWLEDGE MANAGEMENT META-TOOLS
+      // ==================================================================
+
+      letta_knowledge_manager: tool({
+        description: "Manage agent knowledge passages - list, create, modify, or delete passages. Action: list|create|modify|delete",
+        args: {
+          action: tool.schema.string(),
+          agent_id: tool.schema.string(),
+          passage_id: tool.schema.string(),
+          text: tool.schema.string()
+        },
+        async execute(args, ctx) {
+          try {
+            let result
+            switch (args.action) {
+              case 'list':
+                if (!args.agent_id) throw new Error("agent_id required for list action")
+                result = await callMcpTool('list_passages', { agent_id: args.agent_id })
+                break
+
+              case 'create':
+                if (!args.text) throw new Error("text required for create action")
+                result = await callMcpTool('create_passage', { text: args.text })
+                break
+
+              case 'modify':
+                if (!args.passage_id || !args.text) {
+                  throw new Error("passage_id and text required for modify action")
+                }
+                result = await callMcpTool('modify_passage', {
+                  passage_id: args.passage_id,
+                  text: args.text
+                })
+                break
+
+              case 'delete':
+                if (!args.passage_id) throw new Error("passage_id required for delete action")
+                result = await callMcpTool('delete_passage', { passage_id: args.passage_id })
+                break
+
+              default:
+                throw new Error(`Unknown action: ${args.action}`)
+            }
+
+            return JSON.stringify(result, null, 2)
+          } catch (error) {
+            return JSON.stringify({ error: error.message }, null, 2)
+          }
+        }
+      }),
+
+      // ==================================================================
+      // DISCOVERY META-TOOLS
+      // ==================================================================
+
+      letta_discover: tool({
+        description: "Discover available Letta resources - list models, MCP servers, and MCP tools. Resource type: llm_models|embedding_models|mcp_servers|mcp_tools",
+        args: {
+          resource_type: tool.schema.string(),
+          mcp_server_name: tool.schema.string()
+        },
+        async execute(args, ctx) {
+          try {
+            let result
+            switch (args.resource_type) {
+              case 'llm_models':
+                result = await callMcpTool('list_llm_models')
+                break
+
+              case 'embedding_models':
+                result = await callMcpTool('list_embedding_models')
+                break
+
+              case 'mcp_servers':
+                result = await callMcpTool('list_mcp_servers')
+                break
+
+              case 'mcp_tools':
+                if (!args.mcp_server_name) {
+                  throw new Error("mcp_server_name required for mcp_tools")
+                }
+                result = await callMcpTool('list_mcp_tools_by_server', {
+                  server_name: args.mcp_server_name
+                })
+                break
+
+              default:
+                throw new Error(`Unknown resource_type: ${args.resource_type}`)
+            }
+
+            return JSON.stringify(result, null, 2)
+          } catch (error) {
+            return JSON.stringify({ error: error.message }, null, 2)
+          }
+        }
+      }),
+
+      // ==================================================================
+      // WORKFLOW META-TOOLS
+      // ==================================================================
+
+      letta_quick_agent: tool({
+        description: "Quick-create a fully configured agent with memory, tools, and initial knowledge in one step",
+        args: {
+          name: tool.schema.string(),
+          purpose: tool.schema.string(),
+          initial_memory: tool.schema.string(),
+          tool_ids: tool.schema.string(),
+          knowledge_texts: tool.schema.string()
+        },
+        async execute(args, ctx) {
+          try {
+            const results = {
+              agent: null,
+              memory_blocks: [],
+              tools_attached: [],
+              knowledge_added: [],
+              errors: []
+            }
+
+            // 1. Create the agent
+            try {
+              results.agent = await callMcpTool('create_agent', {
+                name: args.name,
+                system: args.purpose
+              })
+            } catch (error) {
+              results.errors.push(`Agent creation failed: ${error.message}`)
+              return JSON.stringify(results, null, 2)
+            }
+
+            const agentId = results.agent.content[0]?.text ?
+              JSON.parse(results.agent.content[0].text).agent_id : null
+
+            if (!agentId) {
+              results.errors.push("Could not extract agent_id from creation response")
+              return JSON.stringify(results, null, 2)
+            }
+
+            // 2. Add initial memory if provided
+            if (args.initial_memory) {
+              try {
+                const memBlock = await callMcpTool('create_memory_block', {
+                  label: 'initial_context',
+                  value: args.initial_memory
+                })
+                results.memory_blocks.push(memBlock)
+
+                // Attach memory to agent
+                const blockId = memBlock.content[0]?.text ?
+                  JSON.parse(memBlock.content[0].text).block_id : null
+
+                if (blockId) {
+                  await callMcpTool('attach_memory_block', {
+                    agent_id: agentId,
+                    block_id: blockId
+                  })
+                }
+              } catch (error) {
+                results.errors.push(`Memory setup failed: ${error.message}`)
+              }
+            }
+
+            // 3. Attach tools if provided
+            if (args.tool_ids) {
+              const toolIds = args.tool_ids.split(',').map(id => id.trim())
+              for (const toolId of toolIds) {
+                try {
+                  const attached = await callMcpTool('attach_tool', {
+                    agent_id: agentId,
+                    tool_id: toolId
+                  })
+                  results.tools_attached.push(attached)
+                } catch (error) {
+                  results.errors.push(`Tool ${toolId} attachment failed: ${error.message}`)
+                }
+              }
+            }
+
+            // 4. Add knowledge passages if provided
+            if (args.knowledge_texts) {
+              const passages = args.knowledge_texts.split(',').map(p => p.trim())
+              for (const text of passages) {
+                try {
+                  const passage = await callMcpTool('create_passage', { text })
+                  results.knowledge_added.push(passage)
+                } catch (error) {
+                  results.errors.push(`Knowledge passage creation failed: ${error.message}`)
+                }
+              }
+            }
+
+            return JSON.stringify(results, null, 2)
+          } catch (error) {
+            return JSON.stringify({ error: error.message }, null, 2)
+          }
+        }
+      })
+    }
+  }
+}
