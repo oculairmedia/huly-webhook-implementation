@@ -17,8 +17,8 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 3000
+      KAFKA_NUM_PARTITIONS: 5
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
@@ -40,12 +40,21 @@ services:
     restart: unless-stopped
   cockroachdb:
     image: cockroachdb/cockroach:v23.1.11
-    command: start-single-node --insecure
+    command: start-single-node --insecure --cache=1GB --max-sql-memory=1GB
     volumes:
       - cockroach_data:/cockroach/cockroach-data
     ports:
       - 26257:26257
       - 8090:8080
+    # Hardening: Memory limits prevent runaway usage and protect against OOM
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    # Hardening: Lower OOM score makes kernel less likely to kill this container
+    oom_score_adj: -500
     healthcheck:
       test:
         - CMD
@@ -92,13 +101,13 @@ services:
         limits:
           memory: 500M
     restart: unless-stopped
-  transactor:
+  transactor-1:
     image: hardcoreeng/transactor:${HULY_VERSION}
     depends_on:
       kafka:
         condition: service_healthy
       cockroachdb:
-        condition: service_started
+        condition: service_healthy
     environment:
       - SERVER_PORT=3333
       - SERVER_SECRET=${SECRET}
@@ -112,6 +121,171 @@ services:
       - STATS_URL=http://stats:4900
       - LAST_NAME_FIRST=${LAST_NAME_FIRST:-true}
       - QUEUE_CONFIG=kafka:9092
+      # Reliability hardening
+      - SERVER_REQUEST_TIMEOUT_MS=120000
+      - DB_POOL_MAX=20
+      - DB_POOL_MIN=5
+      - DB_POOL_IDLE_TIMEOUT=300000
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--timeout=5", "http://localhost:3333/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+  transactor-2:
+    image: hardcoreeng/transactor:${HULY_VERSION}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cockroachdb:
+        condition: service_healthy
+    environment:
+      - SERVER_PORT=3333
+      - SERVER_SECRET=${SECRET}
+      - SERVER_CURSOR_MAXTIMEMS=30000
+      - DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
+      - MONGO_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
+      - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
+      - FRONT_URL=http${SECURE:+s}://${HOST_ADDRESS}
+      - ACCOUNTS_URL=http://account:3000
+      - FULLTEXT_URL=http://fulltext:4700
+      - STATS_URL=http://stats:4900
+      - LAST_NAME_FIRST=${LAST_NAME_FIRST:-true}
+      - QUEUE_CONFIG=kafka:9092
+      - SERVER_REQUEST_TIMEOUT_MS=120000
+      - DB_POOL_MAX=20
+      - DB_POOL_MIN=5
+      - DB_POOL_IDLE_TIMEOUT=300000
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--timeout=5", "http://localhost:3333/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+  transactor-3:
+    image: hardcoreeng/transactor:${HULY_VERSION}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cockroachdb:
+        condition: service_healthy
+    environment:
+      - SERVER_PORT=3333
+      - SERVER_SECRET=${SECRET}
+      - SERVER_CURSOR_MAXTIMEMS=30000
+      - DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
+      - MONGO_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
+      - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
+      - FRONT_URL=http${SECURE:+s}://${HOST_ADDRESS}
+      - ACCOUNTS_URL=http://account:3000
+      - FULLTEXT_URL=http://fulltext:4700
+      - STATS_URL=http://stats:4900
+      - LAST_NAME_FIRST=${LAST_NAME_FIRST:-true}
+      - QUEUE_CONFIG=kafka:9092
+      - SERVER_REQUEST_TIMEOUT_MS=120000
+      - DB_POOL_MAX=20
+      - DB_POOL_MIN=5
+      - DB_POOL_IDLE_TIMEOUT=300000
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--timeout=5", "http://localhost:3333/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+  transactor-4:
+    image: hardcoreeng/transactor:${HULY_VERSION}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cockroachdb:
+        condition: service_healthy
+    environment:
+      - SERVER_PORT=3333
+      - SERVER_SECRET=${SECRET}
+      - SERVER_CURSOR_MAXTIMEMS=30000
+      - DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
+      - MONGO_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
+      - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
+      - FRONT_URL=http${SECURE:+s}://${HOST_ADDRESS}
+      - ACCOUNTS_URL=http://account:3000
+      - FULLTEXT_URL=http://fulltext:4700
+      - STATS_URL=http://stats:4900
+      - LAST_NAME_FIRST=${LAST_NAME_FIRST:-true}
+      - QUEUE_CONFIG=kafka:9092
+      - SERVER_REQUEST_TIMEOUT_MS=120000
+      - DB_POOL_MAX=20
+      - DB_POOL_MIN=5
+      - DB_POOL_IDLE_TIMEOUT=300000
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--timeout=5", "http://localhost:3333/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+  transactor-5:
+    image: hardcoreeng/transactor:${HULY_VERSION}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cockroachdb:
+        condition: service_healthy
+    environment:
+      - SERVER_PORT=3333
+      - SERVER_SECRET=${SECRET}
+      - SERVER_CURSOR_MAXTIMEMS=30000
+      - DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
+      - MONGO_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
+      - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
+      - FRONT_URL=http${SECURE:+s}://${HOST_ADDRESS}
+      - ACCOUNTS_URL=http://account:3000
+      - FULLTEXT_URL=http://fulltext:4700
+      - STATS_URL=http://stats:4900
+      - LAST_NAME_FIRST=${LAST_NAME_FIRST:-true}
+      - QUEUE_CONFIG=kafka:9092
+      - SERVER_REQUEST_TIMEOUT_MS=120000
+      - DB_POOL_MAX=20
+      - DB_POOL_MIN=5
+      - DB_POOL_IDLE_TIMEOUT=300000
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--timeout=5", "http://localhost:3333/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
   collaborator:
     image: hardcoreeng/collaborator:${HULY_VERSION}
@@ -144,7 +318,7 @@ services:
       - SERVER_PORT=3000
       - SERVER_SECRET=${SECRET}
       - DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
-      - TRANSACTOR_URL=ws://transactor:3333;ws${SECURE:+s}://${HOST_ADDRESS}/_transactor
+      - TRANSACTOR_URL=ws://transactor-1:3333;ws${SECURE:+s}://${HOST_ADDRESS}/_transactor
       - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
       - FRONT_URL=http${SECURE:+s}://${HOST_ADDRESS}
       - STATS_URL=http://stats:4900
@@ -163,7 +337,7 @@ services:
     environment:
       - SERVER_SECRET=${SECRET}
       - DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
-      - TRANSACTOR_URL=ws://transactor:3333;ws${SECURE:+s}://${HOST_ADDRESS}/_transactor
+      - TRANSACTOR_URL=ws://transactor-1:3333;ws${SECURE:+s}://${HOST_ADDRESS}/_transactor
       - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
       - MODEL_ENABLED=*
       - ACCOUNTS_URL=http://account:3000
@@ -273,14 +447,11 @@ services:
       - HULY_HTTP_HEADERS_TIMEOUT_MS=130000
       - HULY_HTTP_REQUEST_TIMEOUT_MS=0
       - HULY_ALLOWED_ORIGINS=*
-    volumes:
-      - ./huly-mcp-server/index.js:/app/index.js:ro
-      - ./huly-mcp-server/src:/app/src:ro
     depends_on:
       - nginx
       - front
       - account
-      - transactor
+      - transactor-1
     restart: unless-stopped
     logging:
       driver: json-file
@@ -298,12 +469,14 @@ services:
       - HULY_EMAIL=${HULY_MCP_EMAIL}
       - HULY_PASSWORD=${HULY_MCP_PASSWORD}
       - HULY_WORKSPACE=${HULY_MCP_WORKSPACE}
+    volumes:
+      - ./huly-rest-api/server.js:/app/server.js:ro
     depends_on:
       nginx:
         condition: service_started
       account:
         condition: service_started
-      transactor:
+      transactor-1:
         condition: service_started
       front:
         condition: service_started
@@ -313,6 +486,28 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+  huly-change-watcher:
+    build: ./huly-change-watcher
+    container_name: huly-change-watcher
+    environment:
+      - COCKROACH_HOST=cockroachdb
+      - COCKROACH_PORT=26257
+      - COCKROACH_DATABASE=defaultdb
+      - COCKROACH_USER=root
+      - POLL_INTERVAL=5000
+      - WEBHOOK_URLS=http://172.17.50.1:3099/webhook
+      - PORT=3459
+    ports:
+      - "3459:3459"
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3459/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 volumes:
   cockroach_data: null
   elastic: null

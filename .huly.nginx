@@ -1,3 +1,14 @@
+# Upstream for load-balanced transactors
+upstream transactor_pool {
+    least_conn;  # Better distribution than ip_hash - routes to least busy server
+    server transactor-1:3333 max_fails=3 fail_timeout=30s;
+    server transactor-2:3333 max_fails=3 fail_timeout=30s;
+    server transactor-3:3333 max_fails=3 fail_timeout=30s;
+    server transactor-4:3333 max_fails=3 fail_timeout=30s;
+    server transactor-5:3333 max_fails=3 fail_timeout=30s;
+    keepalive 256;  # Increased from 64 for better connection reuse
+}
+
 server {
     listen 80;
     server_name _;
@@ -55,7 +66,6 @@ server {
     }
 
     location /_transactor {
-        set $upstream_transactor transactor:3333;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -64,12 +74,13 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
         rewrite ^/_transactor(/.*)$ $1 break;
-        proxy_pass http://$upstream_transactor;
+        proxy_pass http://transactor_pool;
     }
 
     location ~ ^/eyJ {
-        set $upstream_transactor_ws transactor:3333;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -78,7 +89,9 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_pass http://$upstream_transactor_ws;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_pass http://transactor_pool;
     }
 
     location /_rekoni {
