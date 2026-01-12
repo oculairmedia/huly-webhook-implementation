@@ -459,6 +459,7 @@ services:
         max-size: 10m
         max-file: "3"
   huly-rest-api:
+    build: ./huly-rest-api
     image: huly-huly-rest-api:latest
     ports:
       - 3458:3458
@@ -466,6 +467,8 @@ services:
       - NODE_ENV=production
       - PORT=3458
       - HULY_URL=http://nginx
+      - HULY_TRANSACTOR_URL=ws://transactor-1:3333
+      - HULY_TRANSACTOR_URLS=ws://transactor-1:3333;ws://transactor-2:3333;ws://transactor-3:3333;ws://transactor-4:3333;ws://transactor-5:3333
       - HULY_EMAIL=${HULY_MCP_EMAIL}
       - HULY_PASSWORD=${HULY_MCP_PASSWORD}
       - HULY_WORKSPACE=${HULY_MCP_WORKSPACE}

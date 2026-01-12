@@ -8,13 +8,17 @@
 import express from 'express';
 import cors from 'cors';
 import apiClientModule from '@hcengineering/api-client';
+import accountClientModule from '@hcengineering/account-client';
 import coreModule from '@hcengineering/core';
 import trackerModule from '@hcengineering/tracker';
 import WebSocket from 'ws';
 
 const apiClient = apiClientModule.default || apiClientModule;
 const { connect } = apiClient;
+const accountClient = accountClientModule.default || accountClientModule;
+const { getClient: getAccountClient } = accountClient;
 const core = coreModule.default || coreModule;
+const { TxFactory, TxOperations } = coreModule;
 const tracker = trackerModule.default || trackerModule;
 
 const app = express();
@@ -24,19 +28,46 @@ const PORT = process.env.PORT || 3458;
 app.use(cors());
 app.use(express.json());
 
-// Configuration from environment
 const config = {
   hulyUrl: process.env.HULY_URL || 'https://pm.oculair.ca',
+  transactorUrl: process.env.HULY_TRANSACTOR_URL,
+  transactorUrls: (process.env.HULY_TRANSACTOR_URLS || process.env.HULY_TRANSACTOR_URL || '').split(';').filter(Boolean),
   email: process.env.HULY_EMAIL || 'emanuvaderland@gmail.com',
   password: process.env.HULY_PASSWORD,
   workspace: process.env.HULY_WORKSPACE || 'agentspace',
 };
 
-// Global client instance (will be initialized on startup)
+// Connection pool for parallel operations across multiple transactors
 let hulyClient = null;
+let txOps = null;
+let clientPool = [];
+let poolIndex = 0;
+
+function createSocketFactory() {
+  return (url) => {
+    let targetUrl = url;
+    if (config.transactorUrl) {
+      targetUrl = url.replace(/wss?:\/\/[^\/]+/, config.transactorUrl);
+      console.log('[Huly REST] WebSocket connecting to:', targetUrl, '(internal)');
+    } else {
+      console.log('[Huly REST] WebSocket connecting to:', url);
+    }
+    return new WebSocket(targetUrl);
+  };
+}
 
 /**
- * Initialize Huly client connection with retry logic
+ * Initialize client with internal Docker network connection for better performance.
+ * 
+ * The key insight: @hcengineering/api-client's connect() calls selectWorkspace() with
+ * kind='external' by default, which returns external URLs (wss://pm.oculair.ca/...).
+ * 
+ * For Docker-internal connections, we need to:
+ * 1. Login to get a token
+ * 2. Call selectWorkspace(workspace, 'internal') to get internal endpoint + token
+ * 3. Connect using the internal endpoint with internal-valid token
+ * 
+ * This avoids the extra network hop through external reverse proxy.
  */
 async function initializeClient() {
   const maxAttempts = 10;
@@ -44,7 +75,6 @@ async function initializeClient() {
   const backoffFactor = 1.5;
   const maxDelay = 15000;
   
-  // Wait for services to be ready on initial startup
   console.log('[Huly REST] Waiting 10s for services to initialize...');
   await new Promise(resolve => setTimeout(resolve, 10000));
   
@@ -57,23 +87,24 @@ async function initializeClient() {
       console.log('[Huly REST] URL:', config.hulyUrl);
       console.log('[Huly REST] Email:', config.email);
       console.log('[Huly REST] Workspace:', config.workspace);
+      console.log('[Huly REST] Internal transactor URL:', config.transactorUrl || '(not configured)');
       console.log('[Huly REST] ========================================');
 
-      // Connect to the platform using the SDK
-      console.log('[Huly REST] Calling connect() from @hcengineering/api-client...');
-      hulyClient = await connect(config.hulyUrl, {
-        email: config.email,
-        password: config.password,
-        workspace: config.workspace,
-        socketFactory: (url) => {
-          console.log('[Huly REST] WebSocket connecting to:', url);
-          return new WebSocket(url);
-        },
-      });
+      if (config.transactorUrl) {
+        await initializeInternalConnection();
+      } else {
+        await initializeExternalConnection();
+      }
 
       console.log('[Huly REST] ✅ Successfully connected to Huly platform');
       
-      // Verify connection works
+      if (hulyClient.client && typeof hulyClient.client.apply === 'function') {
+        txOps = hulyClient.client;
+        console.log('[Huly REST] ✅ TxOperations available for batch transactions');
+      } else {
+        console.log('[Huly REST] ⚠ TxOperations not accessible, using sequential mode');
+      }
+      
       console.log('[Huly REST] Verifying connection...');
       const testProjects = await hulyClient.findAll(tracker.class.Project, {}, { limit: 1 });
       console.log('[Huly REST] ✅ Connection verified, found', testProjects.length, 'test project(s)');
@@ -90,7 +121,6 @@ async function initializeClient() {
         throw error;
       }
       
-      // Calculate delay with exponential backoff
       const delay = Math.min(
         initialDelay * Math.pow(backoffFactor, retryCount - 1),
         maxDelay
@@ -100,6 +130,68 @@ async function initializeClient() {
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
+}
+
+async function initializeInternalConnection() {
+  console.log('[Huly REST] Attempting internal connection via Docker network...');
+  
+  const accountUrl = `${config.hulyUrl}/_accounts`;
+  console.log('[Huly REST] Account service URL:', accountUrl);
+  
+  const accountClientInstance = getAccountClient(accountUrl);
+  const loginInfo = await accountClientInstance.login(config.email, config.password);
+  console.log('[Huly REST] ✅ Login successful');
+  
+  const authenticatedAccountClient = getAccountClient(accountUrl, loginInfo.token);
+  const wsLoginInfo = await authenticatedAccountClient.selectWorkspace(config.workspace, 'internal');
+  
+  if (!wsLoginInfo) {
+    throw new Error(`Workspace ${config.workspace} not found`);
+  }
+  
+  console.log('[Huly REST] ✅ Workspace selected (internal mode)');
+  console.log('[Huly REST] Available transactors:', config.transactorUrls.length || 1);
+  
+  const transactorUrls = config.transactorUrls.length > 0 
+    ? config.transactorUrls 
+    : [config.transactorUrl];
+  
+  for (const transactorUrl of transactorUrls) {
+    const client = await connect(config.hulyUrl, {
+      token: wsLoginInfo.token,
+      workspace: config.workspace,
+      socketFactory: (url) => {
+        const internalUrl = `${transactorUrl}/${wsLoginInfo.token}`;
+        console.log('[Huly REST] WebSocket connecting to:', internalUrl);
+        return new WebSocket(internalUrl);
+      },
+    });
+    clientPool.push(client);
+  }
+  
+  hulyClient = clientPool[0];
+  console.log('[Huly REST] ✅ Connected to', clientPool.length, 'transactor(s)');
+}
+
+function getNextClient() {
+  if (clientPool.length === 0) return hulyClient;
+  poolIndex = (poolIndex + 1) % clientPool.length;
+  return clientPool[poolIndex];
+}
+
+/**
+ * Initialize connection using standard external flow.
+ * Used when HULY_TRANSACTOR_URL is not configured.
+ */
+async function initializeExternalConnection() {
+  console.log('[Huly REST] Using external connection (no internal transactor configured)');
+  
+  hulyClient = await connect(config.hulyUrl, {
+    email: config.email,
+    password: config.password,
+    workspace: config.workspace,
+    socketFactory: createSocketFactory(),
+  });
 }
 
 /**
@@ -1140,12 +1232,130 @@ async function parallelLimit(items, limit, fn) {
   return Promise.allSettled(results);
 }
 
+function chunkArray(items, chunkSize) {
+  const safeChunkSize = Math.max(1, Math.floor(chunkSize));
+  const chunks = [];
+  for (let i = 0; i < items.length; i += safeChunkSize) {
+    chunks.push(items.slice(i, i + safeChunkSize));
+  }
+  return chunks;
+}
+
+function getIssueCollectionMeta(issue) {
+  const { attachedTo, attachedToClass, collection } = issue;
+  if (!attachedTo || !attachedToClass || !collection) {
+    return null;
+  }
+  return { attachedTo, attachedToClass, collection };
+}
+
+async function deleteIssuesInBatches(issues, { batchSize = 200, logPrefix = '[Huly REST]' } = {}) {
+  if (!hulyClient) {
+    throw new Error('Huly client not initialized');
+  }
+
+  const startedAt = Date.now();
+  const missingMeta = [];
+  
+  const validIssues = issues.filter(issue => {
+    const meta = getIssueCollectionMeta(issue);
+    if (!meta) {
+      missingMeta.push(issue.identifier ?? issue._id);
+      return false;
+    }
+    return true;
+  });
+
+  if (missingMeta.length > 0) {
+    console.log(`${logPrefix} Skipping ${missingMeta.length} issues (missing metadata)`);
+  }
+
+  if (validIssues.length === 0) {
+    return { deleted: 0, failed: missingMeta.length, elapsedMs: Date.now() - startedAt };
+  }
+
+  let succeeded = 0;
+  let opsFailed = 0;
+
+  const numClients = clientPool.length || 1;
+  const issuesPerClient = Math.ceil(validIssues.length / numClients);
+  const clientChunks = chunkArray(validIssues, issuesPerClient);
+  
+  console.log(`${logPrefix} Distributing ${validIssues.length} issues across ${clientChunks.length} transactor(s)`);
+
+  const deletePromises = clientChunks.map(async (clientIssues, clientIdx) => {
+    const client = clientPool[clientIdx] || hulyClient;
+    const clientTxOps = client.client;
+    let clientSucceeded = 0;
+    let clientFailed = 0;
+    
+    if (clientTxOps && typeof clientTxOps.apply === 'function') {
+      const batches = chunkArray(clientIssues, batchSize);
+      for (const [batchIdx, batch] of batches.entries()) {
+        try {
+          const ops = clientTxOps.apply(`bulk-delete-t${clientIdx}-b${batchIdx}`);
+          for (const issue of batch) {
+            const meta = getIssueCollectionMeta(issue);
+            ops.removeCollection(
+              tracker.class.Issue,
+              issue.space,
+              issue._id,
+              meta.attachedTo,
+              meta.attachedToClass,
+              meta.collection
+            );
+          }
+          const result = await ops.commit(false);
+          if (result.result) {
+            clientSucceeded += batch.length;
+          } else {
+            clientFailed += batch.length;
+          }
+        } catch (err) {
+          console.log(`${logPrefix} T${clientIdx} batch ${batchIdx + 1} failed: ${err.message}`);
+          clientFailed += batch.length;
+        }
+      }
+    } else {
+      for (const issue of clientIssues) {
+        try {
+          const meta = getIssueCollectionMeta(issue);
+          await client.removeCollection(
+            tracker.class.Issue,
+            issue.space,
+            issue._id,
+            meta.attachedTo,
+            meta.attachedToClass,
+            meta.collection
+          );
+          clientSucceeded++;
+        } catch (err) {
+          clientFailed++;
+        }
+      }
+    }
+    
+    return { succeeded: clientSucceeded, failed: clientFailed };
+  });
+
+  const results = await Promise.all(deletePromises);
+  for (const r of results) {
+    succeeded += r.succeeded;
+    opsFailed += r.failed;
+  }
+
+  const totalFailed = opsFailed + missingMeta.length;
+  console.log(`${logPrefix} Deleted ${succeeded}/${issues.length} issues (${totalFailed} failed) in ${Date.now() - startedAt}ms`);
+
+  return { deleted: succeeded, failed: totalFailed, elapsedMs: Date.now() - startedAt };
+}
+
 /**
- * DELETE /api/issues/bulk - Batch delete multiple issues (OPTIMIZED - parallel)
+ * DELETE /api/issues/bulk - Batch delete multiple issues (OPTIMIZED - batched tx)
  * Body: {
  *   identifiers: ["PROJ-1", "PROJ-2", ...],
  *   cascade: true/false,
- *   concurrency: 10,
+ *   batchSize: 50,
  *   fast: false  // Skip sub-issue handling for maximum speed
  * }
  */
@@ -1156,20 +1366,19 @@ app.delete('/api/issues/bulk', async (req, res) => {
       return res.status(503).json({ error: 'Huly client not initialized' });
     }
 
-    const { identifiers, cascade = false, concurrency = 10, fast = false } = req.body;
+    const { identifiers, cascade = false, batchSize = 50, fast = false } = req.body;
 
     if (!identifiers || !Array.isArray(identifiers) || identifiers.length === 0) {
       return res.status(400).json({ error: 'identifiers array is required' });
     }
 
-    if (identifiers.length > 100) {
-      return res.status(400).json({ error: 'Maximum 100 deletions per request' });
+    if (identifiers.length > 500) {
+      return res.status(400).json({ error: 'Maximum 500 deletions per request' });
     }
 
-    const parallelism = Math.min(Math.max(concurrency, 1), 20); // Clamp between 1-20
-    console.log(`[Huly REST] Bulk deleting ${identifiers.length} issues (cascade: ${cascade}, concurrency: ${parallelism}, fast: ${fast})`);
+    const safeBatchSize = Math.min(Math.max(batchSize, 1), 100);
+    console.log(`[Huly REST] Bulk deleting ${identifiers.length} issues (cascade: ${cascade}, batchSize: ${safeBatchSize}, fast: ${fast})`);
 
-    // Step 1: Batch fetch all issues at once (single query)
     const allIssues = await hulyClient.findAll(tracker.class.Issue, {
       identifier: { $in: identifiers }
     });
@@ -1181,96 +1390,55 @@ app.delete('/api/issues/bulk', async (req, res) => {
 
     console.log(`[Huly REST] Found ${issueMap.size}/${identifiers.length} issues in ${Date.now() - startTime}ms`);
 
-    const deleted = [];
-    const errors = [];
+    const notFound = identifiers.filter(id => !issueMap.has(id));
+    const issuesToDelete = Array.from(issueMap.values());
+    let subIssuesHandled = 0;
 
-    // Step 2: Delete issues in parallel with controlled concurrency
-    const deleteOne = async (identifier) => {
-      const issue = issueMap.get(identifier);
-      if (!issue) {
-        return { identifier, error: 'Issue not found' };
-      }
+    if (!fast && issuesToDelete.length > 0) {
+      const issueIds = issuesToDelete.map(i => i._id);
+      const subIssues = await hulyClient.findAll(tracker.class.Issue, {
+        attachedTo: { $in: issueIds }
+      });
 
-      try {
-        let subIssuesHandled = 0;
-
-        // Fast mode: skip all sub-issue and parent handling
-        if (!fast) {
-          // Handle sub-issues (still need individual queries here)
-          const subIssues = await hulyClient.findAll(tracker.class.Issue, { attachedTo: issue._id });
-
-          if (subIssues.length > 0) {
-            if (cascade) {
-              // Delete sub-issues in parallel
-              await Promise.all(subIssues.map(subIssue =>
-                hulyClient.removeDoc(tracker.class.Issue, subIssue.space, subIssue._id)
-              ));
-              subIssuesHandled = subIssues.length;
-            } else {
-              // Move sub-issues to parent level in parallel
-              const newParent = issue.attachedTo && issue.attachedTo !== 'tracker:ids:NoParent'
-                ? issue.attachedTo
-                : tracker.ids.NoParent;
-              const newParents = issue.parents && Array.isArray(issue.parents)
-                ? issue.parents.slice(0, -1)
-                : [];
-              await Promise.all(subIssues.map(subIssue =>
-                hulyClient.updateDoc(tracker.class.Issue, subIssue.space, subIssue._id, {
-                  attachedTo: newParent,
-                  parents: newParents,
-                })
-              ));
-              subIssuesHandled = subIssues.length;
-            }
-          }
-
-          // Update parent's subIssues count if this is a sub-issue (fire and forget)
-          if (issue.attachedTo && issue.attachedTo !== 'tracker:ids:NoParent') {
-            hulyClient.findOne(tracker.class.Issue, { _id: issue.attachedTo })
-              .then(parent => {
-                if (parent && parent.subIssues > 0) {
-                  return hulyClient.updateDoc(tracker.class.Issue, parent.space, parent._id, {
-                    subIssues: parent.subIssues - 1,
-                  });
-                }
-              })
-              .catch(() => {}); // Ignore parent update errors
-          }
-        }
-
-        // Delete the issue
-        await hulyClient.removeDoc(tracker.class.Issue, issue.space, issue._id);
-        return { identifier, subIssuesHandled, cascaded: cascade, success: true };
-
-      } catch (deleteError) {
-        return { identifier, error: deleteError.message };
-      }
-    };
-
-    // Execute deletions with parallelism
-    const results = await parallelLimit(identifiers, parallelism, deleteOne);
-
-    for (const result of results) {
-      if (result.status === 'fulfilled') {
-        const val = result.value;
-        if (val.success) {
-          deleted.push({ identifier: val.identifier, subIssuesHandled: val.subIssuesHandled, cascaded: val.cascaded });
+      if (subIssues.length > 0) {
+        if (cascade) {
+          await deleteIssuesInBatches(subIssues, { batchSize: 50, logPrefix: '[Huly REST] SubIssue' });
+          subIssuesHandled = subIssues.length;
         } else {
-          errors.push({ identifier: val.identifier, error: val.error });
+          await parallelLimit(
+            subIssues,
+            10,
+            async (subIssue) => {
+              const parentIssue = issueMap.get(subIssue.attachedTo) || issuesToDelete.find(i => i._id === subIssue.attachedTo);
+              const newParent = parentIssue?.attachedTo && parentIssue.attachedTo !== 'tracker:ids:NoParent'
+                ? parentIssue.attachedTo
+                : tracker.ids.NoParent;
+              const newParents = parentIssue?.parents && Array.isArray(parentIssue.parents)
+                ? parentIssue.parents.slice(0, -1)
+                : [];
+              await hulyClient.updateDoc(tracker.class.Issue, subIssue.space, subIssue._id, {
+                attachedTo: newParent,
+                parents: newParents,
+              });
+            }
+          );
+          subIssuesHandled = subIssues.length;
         }
-      } else {
-        errors.push({ identifier: 'unknown', error: result.reason?.message || 'Unknown error' });
       }
     }
 
+    const deleteResult = await deleteIssuesInBatches(issuesToDelete, { batchSize: 50, logPrefix: '[Huly REST]' });
+
     const elapsed = Date.now() - startTime;
-    console.log(`[Huly REST] Bulk deleted ${deleted.length}/${identifiers.length} issues in ${elapsed}ms`);
+    console.log(`[Huly REST] Bulk deleted ${deleteResult.deleted} issues in ${elapsed}ms`);
 
     res.json({
-      deleted,
-      succeeded: deleted.length,
-      failed: errors.length,
-      errors: errors.length > 0 ? errors : undefined,
+      deleted: issuesToDelete.slice(0, deleteResult.deleted).map(i => ({ identifier: i.identifier })),
+      succeeded: deleteResult.deleted,
+      failed: notFound.length + deleteResult.failed,
+      subIssuesHandled,
+      cascaded: cascade,
+      errors: notFound.length > 0 ? notFound.map(id => ({ identifier: id, error: 'Issue not found' })) : undefined,
       elapsed_ms: elapsed,
     });
   } catch (error) {
@@ -2156,59 +2324,41 @@ app.delete('/api/issues/:identifier', async (req, res) => {
 
     console.log(`[Huly REST] Deleting issue ${identifier} (cascade: ${shouldCascade})`);
 
-    // Find issue
     const issue = await hulyClient.findOne(tracker.class.Issue, { identifier });
     if (!issue) {
       return res.status(404).json({ error: `Issue ${identifier} not found` });
     }
 
-    // Check for sub-issues
     const subIssues = await hulyClient.findAll(tracker.class.Issue, { attachedTo: issue._id });
     const subIssueCount = subIssues.length;
 
-    if (subIssueCount > 0 && !shouldCascade) {
-      // Move sub-issues to parent level (detach from this issue)
-      console.log(`[Huly REST] Moving ${subIssueCount} sub-issues to parent level`);
-      for (const subIssue of subIssues) {
-        // Update sub-issue to have no parent (or inherit grandparent if exists)
-        const newParent = issue.attachedTo && issue.attachedTo !== 'tracker:ids:NoParent' 
-          ? issue.attachedTo 
+    if (subIssueCount > 0) {
+      if (shouldCascade) {
+        console.log(`[Huly REST] Cascade deleting ${subIssueCount} sub-issues`);
+        await deleteIssuesInBatches(subIssues, { batchSize: 50, logPrefix: '[Huly REST] SubIssue' });
+      } else {
+        console.log(`[Huly REST] Moving ${subIssueCount} sub-issues to parent level`);
+        const newParent = issue.attachedTo && issue.attachedTo !== 'tracker:ids:NoParent'
+          ? issue.attachedTo
           : tracker.ids.NoParent;
-        
-        // Update parents array
-        const newParents = issue.parents && Array.isArray(issue.parents) 
-          ? issue.parents.slice(0, -1) // Remove the deleted issue from parents chain
+        const newParents = issue.parents && Array.isArray(issue.parents)
+          ? issue.parents.slice(0, -1)
           : [];
-        
-        await hulyClient.updateDoc(tracker.class.Issue, subIssue.space, subIssue._id, {
-          attachedTo: newParent,
-          parents: newParents,
-        });
-      }
-    } else if (subIssueCount > 0 && shouldCascade) {
-      // Delete sub-issues recursively
-      console.log(`[Huly REST] Cascade deleting ${subIssueCount} sub-issues`);
-      for (const subIssue of subIssues) {
-        await hulyClient.removeDoc(tracker.class.Issue, subIssue.space, subIssue._id);
+
+        await parallelLimit(
+          subIssues,
+          10,
+          async (subIssue) => {
+            await hulyClient.updateDoc(tracker.class.Issue, subIssue.space, subIssue._id, {
+              attachedTo: newParent,
+              parents: newParents,
+            });
+          }
+        );
       }
     }
 
-    // If this is a sub-issue, update parent's subIssues count
-    if (issue.attachedTo && issue.attachedTo !== 'tracker:ids:NoParent') {
-      try {
-        const parent = await hulyClient.findOne(tracker.class.Issue, { _id: issue.attachedTo });
-        if (parent && parent.subIssues > 0) {
-          await hulyClient.updateDoc(tracker.class.Issue, parent.space, parent._id, {
-            subIssues: parent.subIssues - 1,
-          });
-        }
-      } catch (error) {
-        console.error(`[Huly REST] Error updating parent subIssue count:`, error.message);
-      }
-    }
-
-    // Delete the issue
-    await hulyClient.removeDoc(tracker.class.Issue, issue.space, issue._id);
+    await deleteIssuesInBatches([issue], { batchSize: 1, logPrefix: '[Huly REST]' });
 
     console.log(`[Huly REST] Deleted issue ${identifier}`);
 
