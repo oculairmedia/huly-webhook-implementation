@@ -43,6 +43,19 @@ let txOps = null;
 let clientPool = [];
 let poolIndex = 0;
 
+// Connection resilience configuration
+const CONNECTION_CONFIG = {
+  // Timeout for each individual transactor connection attempt
+  connectionTimeout: 30000, // 30 seconds
+  // Minimum number of healthy transactors required to start
+  minHealthyTransactors: 1,
+  // Health check timeout
+  healthCheckTimeout: 5000, // 5 seconds
+  // Retry configuration for failed connections
+  retryAttempts: 2,
+  retryDelay: 2000, // 2 seconds between retries
+};
+
 function createSocketFactory() {
   return (url) => {
     let targetUrl = url;
@@ -54,6 +67,92 @@ function createSocketFactory() {
     }
     return new WebSocket(targetUrl);
   };
+}
+
+/**
+ * Connect to a single transactor with timeout and retry logic
+ * @param {string} transactorUrl - The transactor WebSocket URL
+ * @param {string} token - Authentication token
+ * @param {number} attempt - Current attempt number (for logging)
+ * @returns {Promise<{client: object, transactorUrl: string} | null>}
+ */
+async function connectToTransactor(transactorUrl, token, attempt = 1) {
+  const maxAttempts = CONNECTION_CONFIG.retryAttempts;
+  
+  for (let retry = 0; retry < maxAttempts; retry++) {
+    const attemptNum = retry + 1;
+    try {
+      console.log(`[Huly REST] Connecting to ${transactorUrl} (attempt ${attemptNum}/${maxAttempts})...`);
+      
+      const connectionPromise = connect(config.hulyUrl, {
+        token: token,
+        workspace: config.workspace,
+        socketFactory: (url) => {
+          const internalUrl = `${transactorUrl}/${token}`;
+          console.log(`[Huly REST]   -> WebSocket: ${internalUrl.slice(0, 80)}...`);
+          return new WebSocket(internalUrl);
+        },
+      });
+      
+      // Race against timeout
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`Connection timeout after ${CONNECTION_CONFIG.connectionTimeout}ms`)), 
+          CONNECTION_CONFIG.connectionTimeout);
+      });
+      
+      const client = await Promise.race([connectionPromise, timeoutPromise]);
+      
+      // Verify the connection is healthy
+      const isHealthy = await verifyTransactorHealth(client, transactorUrl);
+      if (!isHealthy) {
+        console.warn(`[Huly REST] ⚠ ${transactorUrl} connected but failed health check`);
+        try { await client.close(); } catch (e) { /* ignore */ }
+        throw new Error('Health check failed');
+      }
+      
+      console.log(`[Huly REST] ✅ ${transactorUrl} connected and healthy`);
+      return { client, transactorUrl };
+      
+    } catch (error) {
+      console.warn(`[Huly REST] ⚠ ${transactorUrl} attempt ${attemptNum} failed: ${error.message}`);
+      
+      if (retry < maxAttempts - 1) {
+        console.log(`[Huly REST]   Retrying in ${CONNECTION_CONFIG.retryDelay}ms...`);
+        await new Promise(r => setTimeout(r, CONNECTION_CONFIG.retryDelay));
+      }
+    }
+  }
+  
+  console.error(`[Huly REST] ❌ ${transactorUrl} failed after ${maxAttempts} attempts`);
+  return null;
+}
+
+/**
+ * Verify a transactor connection is healthy by running a simple query
+ * @param {object} client - The connected client
+ * @param {string} transactorUrl - For logging
+ * @returns {Promise<boolean>}
+ */
+async function verifyTransactorHealth(client, transactorUrl) {
+  try {
+    const healthPromise = (async () => {
+      // Try to access the hierarchy - this validates the connection is working
+      const hierarchy = client.getHierarchy();
+      if (!hierarchy) {
+        throw new Error('Unable to access client hierarchy');
+      }
+      return true;
+    })();
+    
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Health check timeout')), CONNECTION_CONFIG.healthCheckTimeout);
+    });
+    
+    return await Promise.race([healthPromise, timeoutPromise]);
+  } catch (error) {
+    console.warn(`[Huly REST] Health check failed for ${transactorUrl}: ${error.message}`);
+    return false;
+  }
 }
 
 /**
@@ -150,27 +249,98 @@ async function initializeInternalConnection() {
   }
   
   console.log('[Huly REST] ✅ Workspace selected (internal mode)');
-  console.log('[Huly REST] Available transactors:', config.transactorUrls.length || 1);
   
   const transactorUrls = config.transactorUrls.length > 0 
     ? config.transactorUrls 
     : [config.transactorUrl];
   
-  for (const transactorUrl of transactorUrls) {
-    const client = await connect(config.hulyUrl, {
-      token: wsLoginInfo.token,
-      workspace: config.workspace,
-      socketFactory: (url) => {
-        const internalUrl = `${transactorUrl}/${wsLoginInfo.token}`;
-        console.log('[Huly REST] WebSocket connecting to:', internalUrl);
-        return new WebSocket(internalUrl);
-      },
-    });
-    clientPool.push(client);
+  console.log('[Huly REST] Connecting to', transactorUrls.length, 'transactor(s) in parallel...');
+  
+  const connectionPromises = transactorUrls.map((url, idx) => 
+    connectToTransactor(url, wsLoginInfo.token, idx + 1)
+  );
+  
+  const results = await Promise.allSettled(connectionPromises);
+  
+  const successfulConnections = [];
+  const failedTransactors = [];
+  
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    const url = transactorUrls[i];
+    
+    if (result.status === 'fulfilled' && result.value !== null) {
+      successfulConnections.push(result.value);
+    } else {
+      const reason = result.status === 'rejected' ? result.reason?.message : 'Connection returned null';
+      failedTransactors.push({ url, reason });
+    }
   }
   
+  console.log('[Huly REST] ----------------------------------------');
+  console.log(`[Huly REST] Connection results: ${successfulConnections.length}/${transactorUrls.length} succeeded`);
+  
+  if (failedTransactors.length > 0) {
+    console.warn('[Huly REST] Failed transactors:');
+    for (const { url, reason } of failedTransactors) {
+      console.warn(`[Huly REST]   ❌ ${url}: ${reason}`);
+    }
+  }
+  
+  if (successfulConnections.length < CONNECTION_CONFIG.minHealthyTransactors) {
+    throw new Error(
+      `Insufficient healthy transactors: ${successfulConnections.length}/${transactorUrls.length} ` +
+      `(minimum required: ${CONNECTION_CONFIG.minHealthyTransactors})`
+    );
+  }
+  
+  clientPool = successfulConnections.map(c => c.client);
   hulyClient = clientPool[0];
-  console.log('[Huly REST] ✅ Connected to', clientPool.length, 'transactor(s)');
+  
+  console.log('[Huly REST] ✅ Connected to', clientPool.length, 'healthy transactor(s)');
+  
+  if (failedTransactors.length > 0) {
+    console.log('[Huly REST] ⚠ Operating with reduced pool capacity');
+    scheduleTransactorRecovery(failedTransactors, wsLoginInfo.token);
+  }
+}
+
+function scheduleTransactorRecovery(failedTransactors, token) {
+  const RECOVERY_INTERVAL = 60000; // Try to recover failed transactors every 60 seconds
+  
+  console.log(`[Huly REST] Scheduling recovery for ${failedTransactors.length} failed transactor(s)`);
+  
+  const recoveryInterval = setInterval(async () => {
+    const stillFailed = [];
+    
+    for (const { url } of failedTransactors) {
+      if (clientPool.some(c => c._transactorUrl === url)) {
+        continue;
+      }
+      
+      console.log(`[Huly REST] Attempting recovery for ${url}...`);
+      const result = await connectToTransactor(url, token, 1);
+      
+      if (result) {
+        result.client._transactorUrl = url;
+        clientPool.push(result.client);
+        console.log(`[Huly REST] ✅ Recovered ${url} - pool size now ${clientPool.length}`);
+      } else {
+        stillFailed.push({ url, reason: 'Recovery failed' });
+      }
+    }
+    
+    if (stillFailed.length === 0) {
+      console.log('[Huly REST] ✅ All transactors recovered - stopping recovery scheduler');
+      clearInterval(recoveryInterval);
+    } else {
+      failedTransactors.length = 0;
+      failedTransactors.push(...stillFailed);
+    }
+  }, RECOVERY_INTERVAL);
+  
+  process.on('SIGTERM', () => clearInterval(recoveryInterval));
+  process.on('SIGINT', () => clearInterval(recoveryInterval));
 }
 
 function getNextClient() {
