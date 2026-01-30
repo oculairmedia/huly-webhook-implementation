@@ -132,12 +132,8 @@ services:
           memory: 1G
         reservations:
           memory: 256M
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--timeout=5", "http://localhost:3333/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+    # Healthcheck removed: Transactor has no HTTP health endpoint (GET / returns 404)
+    # This caused false "unhealthy" status. See HULLY-251 for details.
     restart: unless-stopped
   transactor-2:
     image: hardcoreeng/transactor:${HULY_VERSION}
@@ -169,12 +165,6 @@ services:
           memory: 1G
         reservations:
           memory: 256M
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--timeout=5", "http://localhost:3333/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
     restart: unless-stopped
   transactor-3:
     image: hardcoreeng/transactor:${HULY_VERSION}
@@ -206,12 +196,6 @@ services:
           memory: 1G
         reservations:
           memory: 256M
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--timeout=5", "http://localhost:3333/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
     restart: unless-stopped
   transactor-4:
     image: hardcoreeng/transactor:${HULY_VERSION}
@@ -243,12 +227,6 @@ services:
           memory: 1G
         reservations:
           memory: 256M
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--timeout=5", "http://localhost:3333/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
     restart: unless-stopped
   transactor-5:
     image: hardcoreeng/transactor:${HULY_VERSION}
@@ -280,12 +258,6 @@ services:
           memory: 1G
         reservations:
           memory: 256M
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--timeout=5", "http://localhost:3333/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
     restart: unless-stopped
   collaborator:
     image: hardcoreeng/collaborator:${HULY_VERSION}
@@ -447,6 +419,7 @@ services:
       - HULY_HTTP_HEADERS_TIMEOUT_MS=130000
       - HULY_HTTP_REQUEST_TIMEOUT_MS=0
       - HULY_ALLOWED_ORIGINS=*
+      - HULY_TRANSACTOR_URL=ws://transactor-1:3333
     depends_on:
       - nginx
       - front
