@@ -59,6 +59,174 @@ const CONNECTION_CONFIG = {
   retryDelay: 2000, // 2 seconds between retries
 };
 
+class TTLCache {
+  constructor(maxSize = 200, defaultTTL = 300000) {
+    this.cache = new Map();
+    this.maxSize = maxSize;
+    this.defaultTTL = defaultTTL;
+    this.hits = 0;
+    this.misses = 0;
+    this.staleHits = 0;
+    this._revalidating = new Set();
+  }
+  
+  get(key) {
+    const entry = this.cache.get(key);
+    if (!entry) { this.misses++; return undefined; }
+    if (Date.now() > entry.expires) {
+      this.cache.delete(key);
+      this.misses++;
+      return undefined;
+    }
+    this.hits++;
+    return entry.data;
+  }
+  
+  getRaw(key) {
+    return this.cache.get(key) || null;
+  }
+  
+  set(key, data, ttl) {
+    if (this.cache.size >= this.maxSize) {
+      const firstKey = this.cache.keys().next().value;
+      this.cache.delete(firstKey);
+    }
+    this.cache.set(key, { data, expires: Date.now() + (ttl || this.defaultTTL), timestamp: Date.now() });
+  }
+  
+  invalidate(pattern) {
+    if (typeof pattern === 'string') {
+      for (const key of this.cache.keys()) {
+        if (key.startsWith(pattern)) this.cache.delete(key);
+      }
+    }
+  }
+  
+  clear() { this.cache.clear(); }
+  get size() { return this.cache.size; }
+  get hitRate() {
+    const total = this.hits + this.misses + this.staleHits;
+    return total === 0 ? 0 : Math.round(((this.hits + this.staleHits) / total) * 100);
+  }
+  get stats() {
+    return { size: this.cache.size, hits: this.hits, misses: this.misses, staleHits: this.staleHits, hitRate: this.hitRate };
+  }
+  isRevalidating(key) { return this._revalidating.has(key); }
+  markRevalidating(key) { this._revalidating.add(key); }
+  clearRevalidating(key) { this._revalidating.delete(key); }
+}
+
+const metadataCache = new TTLCache(500, 300000);
+const CACHE_TTL = {
+  projects: 180000,
+  statuses: 600000,
+  components: 300000,
+  milestones: 300000,
+  accounts: 600000,
+  issueCount: 120000,
+  descriptions: 300000,
+};
+
+const inflight = new Map();
+
+async function coalescedFindAll(client, cls, query, options) {
+  const key = JSON.stringify({ cls: String(cls), query, options });
+  if (inflight.has(key)) {
+    return inflight.get(key);
+  }
+  const promise = client.findAll(cls, query, options).finally(() => {
+    inflight.delete(key);
+  });
+  inflight.set(key, promise);
+  return promise;
+}
+
+async function getWithSWR(cacheKey, fetcher, { ttl, staleTTL } = {}) {
+  ttl = ttl || 300000;
+  staleTTL = staleTTL || ttl * 2;
+  const cached = metadataCache.getRaw(cacheKey);
+  
+  if (cached && Date.now() < cached.expires) {
+    metadataCache.hits++;
+    return cached.data;
+  }
+  
+  if (cached && Date.now() - cached.timestamp < staleTTL) {
+    metadataCache.staleHits++;
+    if (!metadataCache.isRevalidating(cacheKey)) {
+      metadataCache.markRevalidating(cacheKey);
+      fetcher()
+        .then(data => metadataCache.set(cacheKey, data, ttl))
+        .catch(() => {})
+        .finally(() => metadataCache.clearRevalidating(cacheKey));
+    }
+    return cached.data;
+  }
+  
+  metadataCache.misses++;
+  const data = await fetcher();
+  metadataCache.set(cacheKey, data, ttl);
+  return data;
+}
+
+const QUERY_TIMEOUT = parseInt(process.env.HULY_QUERY_TIMEOUT_MS || '15000', 10);
+
+async function findAllWithTimeout(client, cls, query, options, timeoutMs) {
+  timeoutMs = timeoutMs || QUERY_TIMEOUT;
+  try {
+    return await Promise.race([
+      client.findAll(cls, query, options),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error(`Query timeout (${timeoutMs}ms)`)), timeoutMs)
+      ),
+    ]);
+  } catch (err) {
+    const cacheKey = `findAll:${String(cls)}:${JSON.stringify(query)}`;
+    const stale = metadataCache.getRaw(cacheKey);
+    if (stale) {
+      console.warn(`[Huly REST] Query timed out, serving stale data for ${cacheKey}`);
+      metadataCache.staleHits++;
+      return stale.data;
+    }
+    throw err;
+  }
+}
+
+async function getCachedStatuses(projectId) {
+  return getWithSWR(`statuses:${projectId}`, async () => {
+    const client = getNextClient();
+    let statuses = await coalescedFindAll(client, tracker.class.IssueStatus, { space: projectId });
+    if (statuses.length === 0) {
+      statuses = await coalescedFindAll(client, tracker.class.IssueStatus, { space: 'core:space:Model' });
+    }
+    return statuses;
+  }, { ttl: CACHE_TTL.statuses });
+}
+
+async function getCachedComponents(projectId) {
+  return getWithSWR(`components:${projectId}`, async () => {
+    return coalescedFindAll(getNextClient(), tracker.class.Component, { space: projectId });
+  }, { ttl: CACHE_TTL.components });
+}
+
+async function getCachedMilestones(projectId) {
+  return getWithSWR(`milestones:${projectId}`, async () => {
+    return coalescedFindAll(getNextClient(), tracker.class.Milestone, { space: projectId });
+  }, { ttl: CACHE_TTL.milestones });
+}
+
+async function getCachedProjects() {
+  return getWithSWR('projects:all', async () => {
+    return coalescedFindAll(getNextClient(), tracker.class.Project, {});
+  }, { ttl: CACHE_TTL.projects });
+}
+
+async function getCachedAccounts() {
+  return getWithSWR('accounts:all', async () => {
+    return coalescedFindAll(getNextClient(), core.class.Account, {});
+  }, { ttl: CACHE_TTL.accounts });
+}
+
 function createSocketFactory() {
   return (url) => {
     let targetUrl = url;
@@ -519,19 +687,19 @@ async function batchFormatIssues(issues, project, options = {}) {
   // 2. Batch fetch all related entities (5 queries total instead of N*5)
   const [statuses, components, milestones, assignees, parents] = await Promise.all([
     statusIds.length > 0 
-      ? hulyClient.findAll(tracker.class.IssueStatus, { _id: { $in: statusIds } })
+      ? getCachedStatuses(project._id).then(all => all.filter(s => statusIds.includes(s._id)))
       : [],
     componentIds.length > 0 
-      ? hulyClient.findAll(tracker.class.Component, { _id: { $in: componentIds } })
+      ? getCachedComponents(project._id).then(all => all.filter(c => componentIds.includes(c._id)))
       : [],
     milestoneIds.length > 0 
-      ? hulyClient.findAll(tracker.class.Milestone, { _id: { $in: milestoneIds } })
+      ? getCachedMilestones(project._id).then(all => all.filter(m => milestoneIds.includes(m._id)))
       : [],
     assigneeIds.length > 0 
-      ? hulyClient.findAll(core.class.Account, { _id: { $in: assigneeIds } })
+      ? getCachedAccounts().then(all => all.filter(a => assigneeIds.includes(a._id)))
       : [],
     parentIds.length > 0 
-      ? hulyClient.findAll(tracker.class.Issue, { _id: { $in: parentIds } })
+      ? coalescedFindAll(getNextClient(), tracker.class.Issue, { _id: { $in: parentIds } })
       : []
   ]);
 
@@ -733,6 +901,7 @@ app.get('/health', (req, res) => {
       healthy: poolSize >= expectedSize,
       minRequired: CONNECTION_CONFIG.minHealthyTransactors,
     },
+    cache: metadataCache.stats,
     timestamp: new Date().toISOString(),
   });
 });
@@ -765,6 +934,7 @@ app.get('/health/detailed', async (req, res) => {
       connectionTimeout: CONNECTION_CONFIG.connectionTimeout,
       minHealthyTransactors: CONNECTION_CONFIG.minHealthyTransactors,
     },
+    cacheStats: metadataCache.stats,
     uptime: process.uptime(),
     memory: process.memoryUsage(),
     timestamp: new Date().toISOString(),
@@ -780,23 +950,27 @@ app.get('/api/projects', async (req, res) => {
       return res.status(503).json({ error: 'Huly client not initialized' });
     }
 
-    const projects = await hulyClient.findAll(tracker.class.Project, {}, { sort: { modifiedOn: -1 } });
+    const projects = (await getCachedProjects())
+      .slice()
+      .sort((a, b) => (b.modifiedOn || 0) - (a.modifiedOn || 0));
 
-    const projectList = await Promise.all(
-      projects.map(async (project) => {
-        // Count issues in project
-        const issues = await hulyClient.findAll(tracker.class.Issue, { space: project._id });
+    const issueCountMap = await getWithSWR('issueCount:all', async () => {
+      const allIssues = await findAllWithTimeout(getNextClient(), tracker.class.Issue, {}, { projection: { space: 1 } });
+      const counts = new Map();
+      for (const issue of allIssues) {
+        counts.set(issue.space, (counts.get(issue.space) || 0) + 1);
+      }
+      return counts;
+    }, { ttl: CACHE_TTL.issueCount });
 
-        return {
-          identifier: project.identifier,
-          name: project.name,
-          description: project.description || '',
-          issueCount: issues.length,
-          private: project.private || false,
-          archived: project.archived || false,
-        };
-      })
-    );
+    const projectList = projects.map((project) => ({
+      identifier: project.identifier,
+      name: project.name,
+      description: project.description || '',
+      issueCount: issueCountMap.get(project._id) || 0,
+      private: project.private || false,
+      archived: project.archived || false,
+    }));
 
     res.json({
       projects: projectList,
@@ -931,10 +1105,7 @@ app.get('/api/projects/:identifier/tree', async (req, res) => {
     console.log(`[Huly REST] Found ${issues.length} issues to build tree`);
 
     // Get all statuses for name lookup
-    let statuses = await hulyClient.findAll(tracker.class.IssueStatus, { space: project._id });
-    if (statuses.length === 0) {
-      statuses = await hulyClient.findAll(tracker.class.IssueStatus, { space: 'core:space:Model' });
-    }
+    const statuses = await getCachedStatuses(project._id);
     const statusMap = new Map(statuses.map(s => [s._id, s.name]));
 
     const priorityNames = ['NoPriority', 'Urgent', 'High', 'Medium', 'Low'];
@@ -1019,10 +1190,7 @@ app.get('/api/projects/:identifier/activity', async (req, res) => {
     }
 
     // Get all statuses for name lookup
-    let statuses = await hulyClient.findAll(tracker.class.IssueStatus, { space: project._id });
-    if (statuses.length === 0) {
-      statuses = await hulyClient.findAll(tracker.class.IssueStatus, { space: 'core:space:Model' });
-    }
+    const statuses = await getCachedStatuses(project._id);
     const statusMap = new Map(statuses.map(s => [s._id, s.name]));
 
     const priorityNames = ['NoPriority', 'Urgent', 'High', 'Medium', 'Low'];
@@ -1190,12 +1358,19 @@ app.get('/api/issues', async (req, res) => {
     );
 
     // Get all projects for formatting
-    const projects = await hulyClient.findAll(tracker.class.Project, {});
+    const projects = await getCachedProjects();
     const projectMap = new Map(projects.map(p => [p._id, p]));
 
     // Filter by status if provided (need to resolve status names)
     if (status) {
-      const allStatuses = await hulyClient.findAll(tracker.class.IssueStatus, {});
+      const projectStatuses = await Promise.all(projects.map(p => getCachedStatuses(p._id)));
+      const coreStatuses = await getCachedStatuses('core:space:Model');
+      const uniqueStatuses = new Map();
+      for (const s of coreStatuses) uniqueStatuses.set(s._id, s);
+      for (const list of projectStatuses) {
+        for (const s of list) uniqueStatuses.set(s._id, s);
+      }
+      const allStatuses = Array.from(uniqueStatuses.values());
       const matchingStatusIds = allStatuses
         .filter(s => s.name.toLowerCase() === status.toLowerCase())
         .map(s => s._id);
@@ -1303,21 +1478,9 @@ app.get('/api/issues/all', async (req, res) => {
     }
 
     // Get total count for pagination info
-    const allMatchingIssues = await hulyClient.findAll(tracker.class.Issue, query, {});
+    const allMatchingIssues = await findAllWithTimeout(getNextClient(), tracker.class.Issue, query, {});
     const totalCount = allMatchingIssues.length;
 
-    // Fetch paginated issues
-    const issues = await hulyClient.findAll(
-      tracker.class.Issue,
-      query,
-      {
-        sort: { modifiedOn: -1 },
-        limit: limitNum,
-        // Note: Huly SDK may not support skip directly, so we handle it in-memory if needed
-      }
-    );
-
-    // Handle offset in-memory since SDK might not support skip
     const paginatedIssues = allMatchingIssues
       .sort((a, b) => b.modifiedOn - a.modifiedOn)
       .slice(offsetNum, offsetNum + limitNum);
@@ -1396,8 +1559,15 @@ app.patch('/api/issues/bulk', async (req, res) => {
     console.log(`[Huly REST] Bulk updating ${updates.length} issues`);
 
     // Preload lookups for efficiency
-    const allStatuses = await hulyClient.findAll(tracker.class.IssueStatus, {});
-    const projects = await hulyClient.findAll(tracker.class.Project, {});
+    const projects = await getCachedProjects();
+    const projectStatuses = await Promise.all(projects.map(p => getCachedStatuses(p._id)));
+    const coreStatuses = await getCachedStatuses('core:space:Model');
+    const uniqueStatuses = new Map();
+    for (const s of coreStatuses) uniqueStatuses.set(s._id, s);
+    for (const list of projectStatuses) {
+      for (const s of list) uniqueStatuses.set(s._id, s);
+    }
+    const allStatuses = Array.from(uniqueStatuses.values());
     const projectMap = new Map(projects.map(p => [p._id, p]));
 
     const results = [];
@@ -1506,6 +1676,7 @@ app.patch('/api/issues/bulk', async (req, res) => {
     }
 
     console.log(`[Huly REST] Bulk update complete: ${results.length} succeeded, ${errors.length} failed`);
+    metadataCache.invalidate('issueCount:');
 
     res.json({
       results,
@@ -1737,7 +1908,10 @@ app.delete('/api/issues/bulk', async (req, res) => {
       }
     }
 
+    metadataCache.invalidate('issueCount:');
+
     const deleteResult = await deleteIssuesInBatches(issuesToDelete, { batchSize: 50, logPrefix: '[Huly REST]' });
+    metadataCache.invalidate('issueCount:');
 
     const elapsed = Date.now() - startTime;
     console.log(`[Huly REST] Bulk deleted ${deleteResult.deleted} issues in ${elapsed}ms`);
@@ -2190,11 +2364,13 @@ app.post('/api/issues/:identifier/comments', async (req, res) => {
         message: text.trim(),
       }
     );
+    metadataCache.invalidate('issueCount:');
 
     // Update issue's comment count
     await hulyClient.updateDoc(tracker.class.Issue, issue.space, issue._id, {
       comments: (issue.comments || 0) + 1,
     });
+    metadataCache.invalidate('issueCount:');
 
     console.log(`[Huly REST] Created comment on ${identifier}`);
 
@@ -2251,10 +2427,7 @@ app.post('/api/issues/:identifier/subissues', async (req, res) => {
     const priorityValue = PRIORITY_MAP[priority] ?? PRIORITY_MAP.NoPriority;
 
     // Get default status
-    let statuses = await hulyClient.findAll(tracker.class.IssueStatus, { space: project._id });
-    if (statuses.length === 0) {
-      statuses = await hulyClient.findAll(tracker.class.IssueStatus, { space: 'core:space:Model' });
-    }
+    const statuses = await getCachedStatuses(project._id);
     const backlogStatus = statuses.find(s => s.name === 'Backlog') || statuses[0];
     if (!backlogStatus) {
       return res.status(500).json({ error: 'No statuses found in project' });
@@ -2338,6 +2511,7 @@ app.post('/api/issues/:identifier/subissues', async (req, res) => {
       'subIssues',
       issueData
     );
+    metadataCache.invalidate('issueCount:');
 
     // Upload description if provided
     if (description && description.trim()) {
@@ -2352,6 +2526,7 @@ app.post('/api/issues/:identifier/subissues', async (req, res) => {
         await hulyClient.updateDoc(tracker.class.Issue, project._id, issueId, {
           description: descriptionRef,
         });
+        metadataCache.invalidate('issueCount:');
       } catch (error) {
         console.error('[Huly REST] Error uploading description:', error.message);
       }
@@ -2361,6 +2536,7 @@ app.post('/api/issues/:identifier/subissues', async (req, res) => {
     await hulyClient.updateDoc(tracker.class.Issue, parentIssue.space, parentIssue._id, {
       subIssues: (parentIssue.subIssues || 0) + 1,
     });
+    metadataCache.invalidate('issueCount:');
 
     console.log(`[Huly REST] Created sub-issue ${newIdentifier} under ${parentIdentifier}`);
 
@@ -2413,10 +2589,7 @@ app.post('/api/issues', async (req, res) => {
     const priorityValue = PRIORITY_MAP[priority] ?? PRIORITY_MAP.NoPriority;
 
     // Get default status
-    let statuses = await hulyClient.findAll(tracker.class.IssueStatus, { space: project._id });
-    if (statuses.length === 0) {
-      statuses = await hulyClient.findAll(tracker.class.IssueStatus, { space: 'core:space:Model' });
-    }
+    const statuses = await getCachedStatuses(project._id);
     const backlogStatus = statuses.find(s => s.name === 'Backlog') || statuses[0];
     if (!backlogStatus) {
       return res.status(500).json({ error: 'No statuses found in project' });
@@ -2478,6 +2651,7 @@ app.post('/api/issues', async (req, res) => {
       'subIssues',
       issueData
     );
+    metadataCache.invalidate('issueCount:');
 
     // Upload description if provided
     if (description && description.trim()) {
@@ -2492,6 +2666,7 @@ app.post('/api/issues', async (req, res) => {
         await hulyClient.updateDoc(tracker.class.Issue, project._id, issueId, {
           description: descriptionRef,
         });
+        metadataCache.invalidate('issueCount:');
       } catch (error) {
         console.error('[Huly REST] Error uploading description:', error.message);
       }
@@ -2561,10 +2736,7 @@ app.put('/api/issues/:identifier', async (req, res) => {
 
       case 'status':
         // Find status by name
-        let statuses = await hulyClient.findAll(tracker.class.IssueStatus, { space: issue.space });
-        if (statuses.length === 0) {
-          statuses = await hulyClient.findAll(tracker.class.IssueStatus, { space: 'core:space:Model' });
-        }
+        const statuses = await getCachedStatuses(issue.space);
         const targetStatus = statuses.find(s => s.name.toLowerCase() === value.toLowerCase());
         if (!targetStatus) {
           return res.status(400).json({
@@ -2604,6 +2776,7 @@ app.put('/api/issues/:identifier', async (req, res) => {
 
     // Apply update
     await hulyClient.updateDoc(tracker.class.Issue, issue.space, issue._id, updateData);
+    metadataCache.invalidate('issueCount:');
 
     res.json({
       identifier,
@@ -2665,10 +2838,12 @@ app.delete('/api/issues/:identifier', async (req, res) => {
             });
           }
         );
+        metadataCache.invalidate('issueCount:');
       }
     }
 
     await deleteIssuesInBatches([issue], { batchSize: 1, logPrefix: '[Huly REST]' });
+    metadataCache.invalidate('issueCount:');
 
     console.log(`[Huly REST] Deleted issue ${identifier}`);
 
@@ -2746,10 +2921,7 @@ app.patch('/api/issues/:identifier', async (req, res) => {
             break;
 
           case 'status':
-            let statuses = await hulyClient.findAll(tracker.class.IssueStatus, { space: issue.space });
-            if (statuses.length === 0) {
-              statuses = await hulyClient.findAll(tracker.class.IssueStatus, { space: 'core:space:Model' });
-            }
+            const statuses = await getCachedStatuses(issue.space);
             const targetStatus = statuses.find(s => s.name.toLowerCase() === value.toLowerCase());
             if (!targetStatus) {
               errors.push({ field: 'status', error: `Status '${value}' not found`, available: statuses.map(s => s.name) });
@@ -2847,6 +3019,7 @@ app.patch('/api/issues/:identifier', async (req, res) => {
     // Apply updates if we have any
     if (Object.keys(updateData).length > 0) {
       await hulyClient.updateDoc(tracker.class.Issue, issue.space, issue._id, updateData);
+      metadataCache.invalidate('issueCount:');
       console.log(`[Huly REST] Applied updates to ${identifier}:`, Object.keys(appliedUpdates));
     }
 
@@ -2947,6 +3120,7 @@ app.patch('/api/issues/:identifier/parent', async (req, res) => {
       attachedTo: newParentId || tracker.ids.NoParent,
       parents: newParentsArray,
     });
+    metadataCache.invalidate('issueCount:');
 
     // Update old parent's subIssues count (decrement)
     if (oldParentId) {
@@ -2956,6 +3130,7 @@ app.patch('/api/issues/:identifier/parent', async (req, res) => {
           await hulyClient.updateDoc(tracker.class.Issue, oldParent.space, oldParent._id, {
             subIssues: oldParent.subIssues - 1,
           });
+          metadataCache.invalidate('issueCount:');
         }
       } catch (e) {
         console.error(`[Huly REST] Error updating old parent subIssue count:`, e.message);
@@ -2970,6 +3145,7 @@ app.patch('/api/issues/:identifier/parent', async (req, res) => {
           await hulyClient.updateDoc(tracker.class.Issue, newParent.space, newParent._id, {
             subIssues: (newParent.subIssues || 0) + 1,
           });
+          metadataCache.invalidate('issueCount:');
         }
       } catch (e) {
         console.error(`[Huly REST] Error updating new parent subIssue count:`, e.message);
@@ -3051,6 +3227,7 @@ app.put('/api/projects/:identifier', async (req, res) => {
 
     // Apply update
     await hulyClient.updateDoc(tracker.class.Project, core.space.Space, project._id, updateData);
+    metadataCache.invalidate('projects:');
 
     console.log(`[Huly REST] Updated project ${identifier}:`, updatedFields.join(', '));
 
