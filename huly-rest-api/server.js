@@ -42,6 +42,9 @@ let hulyClient = null;
 let txOps = null;
 let clientPool = [];
 let poolIndex = 0;
+let cachedToken = null;
+let healthCheckInterval = null;
+const POOL_HEALTH_CHECK_INTERVAL = 30000;
 
 // Connection resilience configuration
 const CONNECTION_CONFIG = {
@@ -296,6 +299,7 @@ async function initializeInternalConnection() {
   
   clientPool = successfulConnections.map(c => c.client);
   hulyClient = clientPool[0];
+  cachedToken = wsLoginInfo.token;
   
   console.log('[Huly REST] ✅ Connected to', clientPool.length, 'healthy transactor(s)');
   
@@ -343,10 +347,105 @@ function scheduleTransactorRecovery(failedTransactors, token) {
   process.on('SIGINT', () => clearInterval(recoveryInterval));
 }
 
+function isClientHealthy(client) {
+  if (!client) return false;
+  try {
+    // SDK internals: PlatformClient.connection → Client → .getConnection() → ClientConnection.isConnected()
+    // ClientConnection.isConnected() checks websocket.readyState === OPEN && helloReceived
+    const conn = client.connection?.getConnection?.();
+    if (conn && typeof conn.isConnected === 'function') {
+      return conn.isConnected();
+    }
+    // Fallback: cached hierarchy check (doesn't detect dead websocket)
+    const hierarchy = client.getHierarchy();
+    return hierarchy !== null && hierarchy !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 function getNextClient() {
   if (clientPool.length === 0) return hulyClient;
-  poolIndex = (poolIndex + 1) % clientPool.length;
-  return clientPool[poolIndex];
+
+  // Try up to poolSize clients to find a healthy one
+  for (let i = 0; i < clientPool.length; i++) {
+    poolIndex = (poolIndex + 1) % clientPool.length;
+    if (isClientHealthy(clientPool[poolIndex])) {
+      return clientPool[poolIndex];
+    }
+  }
+
+  // All pool clients dead, fall back to primary
+  if (isClientHealthy(hulyClient)) return hulyClient;
+
+  console.error('[Huly REST] ❌ No healthy clients available');
+  return hulyClient; // Return anyway, let caller handle the error
+}
+
+function startPoolHealthCheck() {
+  if (healthCheckInterval) return;
+
+  healthCheckInterval = setInterval(async () => {
+    const deadIndices = [];
+    for (let i = 0; i < clientPool.length; i++) {
+      if (!isClientHealthy(clientPool[i])) {
+        deadIndices.push(i);
+      }
+    }
+
+    // Also check primary client
+    const primaryDead = !isClientHealthy(hulyClient);
+
+    if (deadIndices.length === 0 && !primaryDead) return;
+
+    const aliveCount = clientPool.length - deadIndices.length;
+    console.log(
+      `[Huly REST] Health check: ${deadIndices.length} dead pool client(s), ` +
+      `primary ${primaryDead ? 'DEAD' : 'alive'} (${aliveCount}/${clientPool.length} pool alive)`
+    );
+
+    if (!cachedToken) {
+      console.log('[Huly REST] No cached token, attempting fresh login for reconnection...');
+      try {
+        const accountUrl = `${config.hulyUrl}/_accounts`;
+        const accountClientInstance = getAccountClient(accountUrl);
+        const loginInfo = await accountClientInstance.login(config.email, config.password);
+        const authenticatedClient = getAccountClient(accountUrl, loginInfo.token);
+        const wsLoginInfo = await authenticatedClient.selectWorkspace(config.workspace, 'internal');
+        cachedToken = wsLoginInfo.token;
+      } catch (err) {
+        console.error('[Huly REST] ❌ Failed to get fresh token:', err.message);
+        return;
+      }
+    }
+
+    // Reconnect dead pool clients
+    for (const idx of deadIndices) {
+      const url = config.transactorUrls[idx] || config.transactorUrl;
+      if (!url) continue;
+
+      console.log(`[Huly REST] Reconnecting pool client ${idx} (${url})...`);
+      const result = await connectToTransactor(url, cachedToken, 1);
+      if (result) {
+        clientPool[idx] = result.client;
+        console.log(`[Huly REST] ✅ Pool client ${idx} reconnected`);
+      } else {
+        console.error(`[Huly REST] ❌ Pool client ${idx} reconnection failed`);
+      }
+    }
+
+    // Reconnect primary if dead
+    if (primaryDead && clientPool.length > 0) {
+      const healthyPoolClient = clientPool.find(c => isClientHealthy(c));
+      if (healthyPoolClient) {
+        hulyClient = healthyPoolClient;
+        console.log('[Huly REST] ✅ Primary client restored from pool');
+      }
+    }
+  }, POOL_HEALTH_CHECK_INTERVAL);
+
+  if (healthCheckInterval.unref) healthCheckInterval.unref();
+  console.log(`[Huly REST] Background health check started (every ${POOL_HEALTH_CHECK_INTERVAL / 1000}s)`);
 }
 
 /**
@@ -620,13 +719,54 @@ async function formatIssue(issue, project) {
 // REST API Endpoints
 // ============================================================================
 
-/**
- * Health check endpoint
- */
 app.get('/health', (req, res) => {
+  const poolSize = clientPool.length;
+  const expectedSize = config.transactorUrls.length || 1;
+  const isHealthy = hulyClient !== null && poolSize >= CONNECTION_CONFIG.minHealthyTransactors;
+  
   res.json({
-    status: 'ok',
+    status: isHealthy ? 'ok' : 'degraded',
     connected: hulyClient !== null,
+    transactorPool: {
+      active: poolSize,
+      expected: expectedSize,
+      healthy: poolSize >= expectedSize,
+      minRequired: CONNECTION_CONFIG.minHealthyTransactors,
+    },
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get('/health/detailed', async (req, res) => {
+  const poolSize = clientPool.length;
+  const expectedSize = config.transactorUrls.length || 1;
+  
+  let dbCheck = { status: 'unknown', latencyMs: null };
+  if (hulyClient) {
+    const start = Date.now();
+    try {
+      await hulyClient.findAll(tracker.class.Project, {}, { limit: 1 });
+      dbCheck = { status: 'ok', latencyMs: Date.now() - start };
+    } catch (e) {
+      dbCheck = { status: 'error', error: e.message, latencyMs: Date.now() - start };
+    }
+  }
+  
+  res.json({
+    status: hulyClient !== null ? 'ok' : 'error',
+    connected: hulyClient !== null,
+    transactorPool: {
+      active: poolSize,
+      expected: expectedSize,
+      urls: config.transactorUrls,
+    },
+    database: dbCheck,
+    config: {
+      connectionTimeout: CONNECTION_CONFIG.connectionTimeout,
+      minHealthyTransactors: CONNECTION_CONFIG.minHealthyTransactors,
+    },
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
     timestamp: new Date().toISOString(),
   });
 });
@@ -2941,6 +3081,8 @@ async function startServer() {
       console.log(`[Huly REST] Health check: http://localhost:${PORT}/health`);
       console.log(`[Huly REST] API base URL: http://localhost:${PORT}/api`);
     });
+
+    startPoolHealthCheck();
   } catch (error) {
     console.error('[Huly REST] Failed to start server:', error);
     process.exit(1);
@@ -2950,11 +3092,13 @@ async function startServer() {
 // Handle graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n[Huly REST] Shutting down gracefully...');
+  if (healthCheckInterval) clearInterval(healthCheckInterval);
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
   console.log('\n[Huly REST] Shutting down gracefully...');
+  if (healthCheckInterval) clearInterval(healthCheckInterval);
   process.exit(0);
 });
 
