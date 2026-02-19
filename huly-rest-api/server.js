@@ -12,6 +12,8 @@ import accountClientModule from '@hcengineering/account-client';
 import coreModule from '@hcengineering/core';
 import trackerModule from '@hcengineering/tracker';
 import WebSocket from 'ws';
+import textModule from '@hcengineering/text';
+import textMarkdownModule from '@hcengineering/text-markdown';
 
 const apiClient = apiClientModule.default || apiClientModule;
 const { connect } = apiClient;
@@ -20,16 +22,46 @@ const { getClient: getAccountClient } = accountClient;
 const core = coreModule.default || coreModule;
 const { TxFactory, TxOperations } = coreModule;
 const tracker = trackerModule.default || trackerModule;
+const textPkg = textModule.default || textModule;
+const textMdPkg = textMarkdownModule.default || textMarkdownModule;
+const { jsonToMarkup } = textPkg;
+const { markdownToMarkup } = textMdPkg;
+const { makeCollabId } = coreModule;
 
 const app = express();
 const PORT = process.env.PORT || 3458;
+
+/**
+ * HULLY-259: uploadMarkup calls collaborator's createContent which rejects existing docs.
+ * For updates, use collaborator's updateContent via client.markup.collaborator.updateMarkup.
+ */
+async function updateDescriptionMarkup(client, issue, text) {
+  if (!text || text.trim() === '') return '';
+
+  const markupOps = client.markup;
+  if (!markupOps || !markupOps.collaborator) {
+    return await client.uploadMarkup(tracker.class.Issue, issue._id, 'description', text.trim(), 'markdown');
+  }
+
+  const markup = jsonToMarkup(
+    markdownToMarkup(text.trim(), {
+      refUrl: markupOps.refUrl || '',
+      imageUrl: markupOps.imageUrl || '',
+    })
+  );
+
+  const collabId = makeCollabId(tracker.class.Issue, issue._id, 'description');
+  await markupOps.collaborator.updateMarkup(collabId, markup);
+
+  return issue.description || '';
+}
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
 const config = {
-  hulyUrl: process.env.HULY_URL || 'https://pm.oculair.ca',
+  hulyUrl: process.env.HULY_URL || 'http://192.168.50.90:8101',
   transactorUrl: process.env.HULY_TRANSACTOR_URL,
   transactorUrls: (process.env.HULY_TRANSACTOR_URLS || process.env.HULY_TRANSACTOR_URL || '').split(';').filter(Boolean),
   email: process.env.HULY_EMAIL || 'emanuvaderland@gmail.com',
@@ -2905,13 +2937,7 @@ app.patch('/api/issues/:identifier', async (req, res) => {
 
           case 'description':
             if (value && value.trim()) {
-              const descriptionRef = await hulyClient.uploadMarkup(
-                tracker.class.Issue,
-                issue._id,
-                'description',
-                value.trim(),
-                'markdown'
-              );
+              const descriptionRef = await updateDescriptionMarkup(hulyClient, issue, value.trim());
               updateData.description = descriptionRef;
               appliedUpdates.description = value.trim().substring(0, 100) + (value.length > 100 ? '...' : '');
             } else {
