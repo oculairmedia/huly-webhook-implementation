@@ -11,10 +11,7 @@
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
-    "ws": "^8.16.0",
-    "@hcengineering/core": "0.6.500",
-    "@hcengineering/tracker": "0.6.500",
-    "@hcengineering/api-client": "0.6.500"
+    "ws": "^8.16.0"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -1,10 +1,5 @@
 name: ${DOCKER_NAME}
 version: "3"
-x-logging: &default-logging
-  driver: json-file
-  options:
-    max-size: "10m"
-    max-file: "3"
 services:
   kafka:
     image: apache/kafka:3.7.0
@@ -35,54 +30,17 @@ services:
       timeout: 10s
       retries: 10
       start_period: 30s
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-        reservations:
-          memory: 1G
-    logging: *default-logging
     restart: unless-stopped
   nginx:
-    image: nginx:1.26.3
-    depends_on:
-      transactor-1:
-        condition: service_started
-      transactor-2:
-        condition: service_started
-      transactor-3:
-        condition: service_started
-      transactor-4:
-        condition: service_started
-      transactor-5:
-        condition: service_started
+    image: nginx:1.21.3
     ports:
       - "8101:80"
     volumes:
       - ./.huly.nginx:/etc/nginx/conf.d/default.conf
-    labels:
-      - homepage.group=Productivity
-      - homepage.name=Huly
-      - homepage.icon=si-huly
-      - homepage.href=http://192.168.50.90:8101
-      - homepage.description=Project management and collaboration platform
-    healthcheck:
-      test: ["CMD", "curl", "-f", "-s", "http://localhost:80/"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-        reservations:
-          memory: 32M
-    logging: *default-logging
     restart: unless-stopped
   cockroachdb:
-    image: cockroachdb/cockroach:v24.2.10
-    command: start-single-node --insecure --cache=2GB --max-sql-memory=2GB
+    image: cockroachdb/cockroach:latest-v24.2
+    command: start-single-node --insecure --cache=1GB --max-sql-memory=1GB
     volumes:
       - cockroach_data:/cockroach/cockroach-data
     ports:
@@ -92,9 +50,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 8G
-        reservations:
           memory: 4G
+        reservations:
+          memory: 2G
     # Hardening: Lower OOM score makes kernel less likely to kill this container
     oom_score_adj: -500
     healthcheck:
@@ -107,26 +65,12 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-    logging: *default-logging
     restart: unless-stopped
   minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    image: minio/minio
     command: server /data --address ":9000" --console-address ":9001"
     volumes:
       - files:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "-s", "http://localhost:9000/minio/health/live"]
-      interval: 20s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-    deploy:
-      resources:
-        limits:
-          memory: 1500M
-        reservations:
-          memory: 512M
-    logging: *default-logging
     restart: unless-stopped
   elastic:
     image: elasticsearch:7.14.2
@@ -140,36 +84,22 @@ services:
       - ELASTICSEARCH_PORT_NUMBER=9200
       - BITNAMI_DEBUG=true
       - discovery.type=single-node
-      - ES_JAVA_OPTS=-Xms1536m -Xmx1536m
+      - ES_JAVA_OPTS=-Xms1024m -Xmx1024m
       - http.cors.enabled=true
       - http.cors.allow-origin=http://localhost:8082
     healthcheck:
       interval: 20s
       retries: 10
       test: curl -s http://localhost:9200/_cluster/health | grep -vq '"status":"red"'
-    deploy:
-      resources:
-        limits:
-          memory: 4G
-        reservations:
-          memory: 2G
-    logging: *default-logging
     restart: unless-stopped
   rekoni:
     image: hardcoreeng/rekoni-service:${HULY_VERSION}
     environment:
       - SECRET=${SECRET}
-    healthcheck:
-      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:4004/ | grep -q '200\\|404'"]
-      interval: 20s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
     deploy:
       resources:
         limits:
           memory: 500M
-    logging: *default-logging
     restart: unless-stopped
   transactor-1:
     image: hardcoreeng/transactor:${HULY_VERSION}
@@ -222,7 +152,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    logging: *default-logging
     restart: unless-stopped
   transactor-2:
     image: hardcoreeng/transactor:${HULY_VERSION}
@@ -272,7 +201,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    logging: *default-logging
     restart: unless-stopped
   transactor-3:
     image: hardcoreeng/transactor:${HULY_VERSION}
@@ -322,7 +250,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    logging: *default-logging
     restart: unless-stopped
   transactor-4:
     image: hardcoreeng/transactor:${HULY_VERSION}
@@ -372,7 +299,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    logging: *default-logging
     restart: unless-stopped
   transactor-5:
     image: hardcoreeng/transactor:${HULY_VERSION}
@@ -422,7 +348,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    logging: *default-logging
     restart: unless-stopped
   collaborator:
     image: hardcoreeng/collaborator:${HULY_VERSION}
@@ -441,19 +366,6 @@ services:
       - STATS_URL=http://stats:4900
       - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
       # - PROCEED_V7_MONGO=true # Not needed with CockroachDB
-    healthcheck:
-      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3078', r => { process.exit(r.statusCode ? 0 : 1) }).on('error', () => process.exit(1))\""]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-        reservations:
-          memory: 128M
-    logging: *default-logging
     restart: unless-stopped
   account:
     image: hardcoreeng/account:${HULY_VERSION}
@@ -486,13 +398,6 @@ services:
       - ACCOUNTS_URL=http://account:3000
       - ACCOUNT_PORT=3000
       - QUEUE_CONFIG=kafka:9092
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-        reservations:
-          memory: 64M
-    logging: *default-logging
     restart: unless-stopped
   workspace:
     image: hardcoreeng/workspace:${HULY_VERSION}
@@ -511,19 +416,6 @@ services:
       - ACCOUNTS_DB_URL=postgresql://root@cockroachdb:26257/defaultdb?sslmode=disable
       - STATS_URL=http://stats:4900
       - QUEUE_CONFIG=kafka:9092
-    healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'node' || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          memory: 384M
-        reservations:
-          memory: 128M
-    logging: *default-logging
     restart: unless-stopped
   front:
     image: hardcoreeng/front:${HULY_VERSION}
@@ -549,25 +441,6 @@ services:
       - GITHUB_APP=${GITHUB_APP}
       - GITHUB_CLIENTID=${GITHUB_APP_CLIENT_ID}
       - GITHUB_URL=http${SECURE:+s}://${HOST_ADDRESS}/_github
-    labels:
-      - homepage.group=Productivity
-      - homepage.name=Huly Frontend
-      - homepage.icon=si-huly
-      - homepage.href=http://192.168.50.90:8101
-      - homepage.description=Huly web interface
-    healthcheck:
-      test: ["CMD", "curl", "-f", "-s", "http://localhost:8080/"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-        reservations:
-          memory: 64M
-    logging: *default-logging
     restart: unless-stopped
   fulltext:
     image: hardcoreeng/fulltext:${HULY_VERSION}
@@ -593,19 +466,6 @@ services:
       - STATS_URL=http://stats:4900
       - QUEUE_CONFIG=kafka:9092
       # - PROCEED_V7_MONGO=true # Not needed with CockroachDB
-    healthcheck:
-      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:4700', r => { process.exit(r.statusCode ? 0 : 1) }).on('error', () => process.exit(1))\""]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-        reservations:
-          memory: 128M
-    logging: *default-logging
     restart: unless-stopped
   stats:
     image: hardcoreeng/stats:${HULY_VERSION}
@@ -622,13 +482,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-        reservations:
-          memory: 64M
-    logging: *default-logging
     restart: unless-stopped
   github:
     image: hardcoreeng/github:${HULY_VERSION}
@@ -657,19 +510,6 @@ services:
       - REKONI_URL=http://rekoni:4004
       - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
       - QUEUE_CONFIG=kafka:9092
-    healthcheck:
-      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3500', r => { process.exit(r.statusCode ? 0 : 1) }).on('error', () => process.exit(1))\""]
-      interval: 20s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          memory: 384M
-        reservations:
-          memory: 128M
-    logging: *default-logging
     restart: unless-stopped
   huly-mcp:
     image: huly-huly-mcp:latest
@@ -691,12 +531,6 @@ services:
       - HULY_ALLOWED_ORIGINS=*
       - HULY_TRANSACTOR_URL=ws://transactor-1:3333
       - HULY_TRANSACTOR_URLS=ws://transactor-1:3333;ws://transactor-2:3333;ws://transactor-3:3333;ws://transactor-4:3333;ws://transactor-5:3333
-    labels:
-      - homepage.group=AI & Automation
-      - homepage.name=Huly MCP Server
-      - homepage.icon=si-modelcontextprotocol
-      - homepage.href=http://192.168.50.90:3457
-      - homepage.description=Model Context Protocol server for Huly
     depends_on:
       nginx:
         condition: service_started
@@ -706,18 +540,6 @@ services:
         condition: service_healthy
       transactor-1:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000', r => { process.exit(r.statusCode ? 0 : 1) }).on('error', () => process.exit(1))\""]
-      interval: 15s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-        reservations:
-          memory: 64M
     restart: unless-stopped
     logging:
       driver: json-file
@@ -738,12 +560,6 @@ services:
       - HULY_EMAIL=${HULY_MCP_EMAIL}
       - HULY_PASSWORD=${HULY_MCP_PASSWORD}
       - HULY_WORKSPACE=${HULY_MCP_WORKSPACE}
-    labels:
-      - homepage.group=Development Tools
-      - homepage.name=Huly REST API
-      - homepage.icon=si-swagger
-      - homepage.href=http://192.168.50.90:3458
-      - homepage.description=REST API for Huly platform
     volumes:
       - ./huly-rest-api/server.js:/app/server.js:ro
     depends_on:
@@ -755,18 +571,6 @@ services:
         condition: service_healthy
       front:
         condition: service_started
-    healthcheck:
-      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3458/health', r => { process.exit(r.statusCode === 200 ? 0 : 1) }).on('error', () => process.exit(1))\""]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-        reservations:
-          memory: 64M
     restart: unless-stopped
     logging:
       driver: json-file
@@ -786,22 +590,9 @@ services:
       - PORT=3459
     ports:
       - "3459:3459"
-    labels:
-      - homepage.group=Development Tools
-      - homepage.name=Huly Change Watcher
-      - homepage.icon=si-webhook
-      - homepage.href=http://192.168.50.90:3459
-      - homepage.description=Database change monitoring and webhook service
     depends_on:
       cockroachdb:
         condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-        reservations:
-          memory: 32M
-    logging: *default-logging
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3459/health"]

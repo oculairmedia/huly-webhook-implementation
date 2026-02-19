@@ -55,4 +55,5 @@ huly-rest-api/hully source/
 
 # Env backups with secrets
 .env.backup-*
+.env.backup.*
 .env.test

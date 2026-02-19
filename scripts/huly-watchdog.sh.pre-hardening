@@ -1,0 +1,151 @@
+#!/bin/bash
+#
+# Huly Stack Watchdog
+# Monitors critical services and alerts/recovers on issues
+#
+# Run via cron every 5 minutes:
+#   */5 * * * * /opt/stacks/huly-test-v07/scripts/huly-watchdog.sh >> /var/log/huly-watchdog.log 2>&1
+#
+
+set -e
+cd /opt/stacks/huly-test-v07
+
+ALERT_FILE="/tmp/huly-watchdog-alert"
+LOG_PREFIX="[$(date '+%Y-%m-%d %H:%M:%S')] [huly-watchdog]"
+
+log() {
+    echo "$LOG_PREFIX $1"
+}
+
+alert() {
+    log "ALERT: $1"
+    echo "$1" >> "$ALERT_FILE"
+}
+
+check_disk_usage() {
+    local usage=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
+    if [ "$usage" -gt 80 ]; then
+        alert "CRITICAL: Disk at ${usage}% - immediate cleanup required"
+        return 1
+    elif [ "$usage" -gt 75 ]; then
+        alert "WARNING: Disk at ${usage}% - cleanup recommended"
+        return 0
+    fi
+    log "Disk usage: ${usage}%"
+    return 0
+}
+
+check_cockroach_health() {
+    if ! docker exec huly-test-cockroachdb-1 cockroach node status --insecure &>/dev/null; then
+        alert "CRITICAL: CockroachDB not responding"
+        return 1
+    fi
+    
+    local warnings=$(docker logs huly-test-cockroachdb-1 --since 5m 2>&1 | grep -c "disk slowness" || true)
+    if [ "$warnings" -gt 0 ]; then
+        alert "WARNING: CockroachDB disk slowness detected ($warnings warnings in last 5m)"
+        return 1
+    fi
+    
+    log "CockroachDB: healthy"
+    return 0
+}
+
+check_transactor_health() {
+    local unhealthy=0
+    
+    for i in 1 2 3 4 5; do
+        local container="huly-test-transactor-$i-1"
+        
+        if ! docker ps --format '{{.Names}}' | grep -q "$container"; then
+            alert "CRITICAL: Transactor-$i container not running"
+            ((unhealthy++))
+            continue
+        fi
+        
+        local hung=$(docker logs "$container" --since 5m 2>&1 | grep "request hang found" | tail -1 | grep -oP '"total":\K[0-9]+' || echo "0")
+        if [ "$hung" -gt 100 ]; then
+            alert "WARNING: Transactor-$i has $hung hung requests"
+            ((unhealthy++))
+        fi
+    done
+    
+    if [ "$unhealthy" -gt 2 ]; then
+        alert "CRITICAL: $unhealthy/5 transactors unhealthy - consider restart"
+        return 1
+    fi
+    
+    log "Transactors: $((5-unhealthy))/5 healthy"
+    return 0
+}
+
+check_rest_api_health() {
+    local response=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://localhost:3458/health 2>/dev/null || echo "000")
+    
+    if [ "$response" != "200" ]; then
+        alert "WARNING: REST API unhealthy (HTTP $response)"
+        return 1
+    fi
+    
+    log "REST API: healthy"
+    return 0
+}
+
+check_mcp_health() {
+    local response=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://localhost:3457/health 2>/dev/null || echo "000")
+    
+    if [ "$response" != "200" ]; then
+        alert "WARNING: MCP Server unhealthy (HTTP $response)"
+        return 1
+    fi
+    
+    log "MCP Server: healthy"
+    return 0
+}
+
+auto_recover() {
+    if [ -f "$ALERT_FILE" ]; then
+        local alerts=$(cat "$ALERT_FILE")
+        
+        if echo "$alerts" | grep -q "hung requests"; then
+            log "Attempting auto-recovery: restarting transactors"
+            docker-compose restart transactor-1 transactor-2 transactor-3 transactor-4 transactor-5
+            sleep 30
+            docker-compose restart huly-rest-api huly-mcp
+        fi
+        
+        if echo "$alerts" | grep -q "REST API unhealthy"; then
+            log "Attempting auto-recovery: restarting REST API"
+            docker-compose restart huly-rest-api
+        fi
+        
+        rm -f "$ALERT_FILE"
+    fi
+}
+
+main() {
+    log "========== Watchdog Check Started =========="
+    
+    rm -f "$ALERT_FILE"
+    
+    check_disk_usage || true
+    check_cockroach_health || true
+    check_transactor_health || true
+    check_rest_api_health || true
+    check_mcp_health || true
+    
+    if [ -f "$ALERT_FILE" ]; then
+        log "Issues detected:"
+        cat "$ALERT_FILE"
+        
+        if [ "${AUTO_RECOVER:-false}" = "true" ]; then
+            auto_recover
+        fi
+    else
+        log "All systems healthy"
+    fi
+    
+    log "========== Watchdog Check Complete =========="
+}
+
+main "$@"
