@@ -57,3 +57,7 @@ huly-rest-api/hully source/
 .env.backup-*
 .env.backup.*
 .env.test
+
+# OpenCode / Letta local state
+.letta/
+.opencode/matrix.lock
