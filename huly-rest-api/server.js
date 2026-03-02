@@ -377,8 +377,10 @@ async function initializeClient() {
   const backoffFactor = 1.5;
   const maxDelay = 15000;
   
-  console.log('[Huly REST] Waiting 10s for services to initialize...');
-  await new Promise(resolve => setTimeout(resolve, 10000));
+  // Dependencies already waited on via depends_on: service_healthy in docker-compose.
+  // A short grace period is sufficient for internal initialization to complete.
+  console.log('[Huly REST] Waiting 3s for services to finish internal init...');
+  await new Promise(resolve => setTimeout(resolve, 3000));
   
   let retryCount = 0;
   
@@ -3273,23 +3275,40 @@ app.put('/api/projects/:identifier', async (req, res) => {
 // Server Startup
 // ============================================================================
 
-async function startServer() {
-  try {
-    // Initialize Huly client
-    await initializeClient();
-
-    // Start Express server
-    app.listen(PORT, () => {
-      console.log(`[Huly REST] Server listening on port ${PORT}`);
-      console.log(`[Huly REST] Health check: http://localhost:${PORT}/health`);
-      console.log(`[Huly REST] API base URL: http://localhost:${PORT}/api`);
-    });
-
-    startPoolHealthCheck();
-  } catch (error) {
-    console.error('[Huly REST] Failed to start server:', error);
-    process.exit(1);
+/**
+ * Resilient client initialization wrapper.
+ * Never exits — retries indefinitely until connection succeeds.
+ * The Express server is already listening, so healthchecks pass
+ * and API endpoints return 503 while client is initializing.
+ */
+async function initializeClientWithRetry() {
+  const RETRY_DELAY = 15000;
+  while (true) {
+    try {
+      await initializeClient();
+      startPoolHealthCheck();
+      console.log('[Huly REST] ✅ Client initialization complete — API fully operational');
+      return;
+    } catch (error) {
+      console.error(`[Huly REST] ⚠ Client initialization failed: ${error.message}`);
+      console.log(`[Huly REST] Retrying in ${RETRY_DELAY / 1000}s...`);
+      await new Promise(r => setTimeout(r, RETRY_DELAY));
+    }
   }
+}
+
+async function startServer() {
+  // Start Express IMMEDIATELY so healthcheck port is available.
+  // API endpoints already guard with: if (!hulyClient) return 503
+  app.listen(PORT, () => {
+    console.log(`[Huly REST] Server listening on port ${PORT}`);
+    console.log(`[Huly REST] Health check: http://localhost:${PORT}/health`);
+    console.log(`[Huly REST] API base URL: http://localhost:${PORT}/api`);
+    console.log(`[Huly REST] Client initializing in background...`);
+  });
+
+  // Initialize client in background — never exit, always retry
+  initializeClientWithRetry();
 }
 
 // Handle graceful shutdown
