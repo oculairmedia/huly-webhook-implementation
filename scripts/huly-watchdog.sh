@@ -7,11 +7,24 @@
 #   */5 * * * * /opt/stacks/huly-test-v07/scripts/huly-watchdog.sh >> /var/log/huly-watchdog.log 2>&1
 #
 
-STACK_DIR="/opt/stacks/huly-test-v07"
+STACK_DIR="${STACK_DIR:-/opt/stacks/huly-test-v07}"
 cd "$STACK_DIR"
 
 ALERT_FILE="/tmp/huly-watchdog-alert"
+AUTH_PROBE_STATE_DIR="/tmp/huly-watchdog-auth-probe"
+RESTART_STATE_DIR="/tmp/huly-watchdog-restarts"
+AUTH_PROBE_FAILURE_THRESHOLD="${TRANSACTOR_AUTH_FAILURE_THRESHOLD:-3}"
+TRANSACTOR_RESTART_COOLDOWN_SECONDS="${TRANSACTOR_RESTART_COOLDOWN_SECONDS:-300}"
+PROBE_RUNNER_IMAGE="${TRANSACTOR_PROBE_IMAGE:-huly-huly-mcp:latest}"
+PROBE_SCRIPT_PATH="$STACK_DIR/scripts/transactor-auth-healthcheck.js"
+PROBE_ACCOUNTS_URL="${TRANSACTOR_PROBE_ACCOUNTS_URL:-http://account:3000}"
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-huly-test}"
+REST_HEALTH_URL="${REST_HEALTH_URL:-http://localhost:3458/health}"
+MCP_HEALTH_URL="${MCP_HEALTH_URL:-http://localhost:3457/health}"
 LOG_PREFIX="[$(date '+%Y-%m-%d %H:%M:%S')] [huly-watchdog]"
+
+mkdir -p "$AUTH_PROBE_STATE_DIR"
+mkdir -p "$RESTART_STATE_DIR"
 
 log() {
     echo "$LOG_PREFIX $1"
@@ -24,7 +37,159 @@ alert() {
 
 # Resolve container ID for a compose service (dynamic, not hardcoded)
 get_container() {
-    docker compose -f "$STACK_DIR/docker-compose.yml" ps -q "$1" 2>/dev/null | head -1
+    docker ps -aq \
+        --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" \
+        --filter "label=com.docker.compose.service=$1" \
+        | head -1
+}
+
+get_container_env() {
+    local service="$1"
+    local key="$2"
+    local fallback="$3"
+    local container value
+
+    container=$(get_container "$service")
+    if [ -n "$container" ]; then
+        value=$(docker inspect "$container" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep "^${key}=" | tail -1 | cut -d= -f2-)
+    fi
+
+    echo "${value:-$fallback}"
+}
+
+get_stack_network() {
+    local container
+    container=$(get_container account)
+    if [ -z "$container" ]; then
+        return 1
+    fi
+
+    docker inspect "$container" --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}' 2>/dev/null | head -1
+}
+
+read_restart_timestamp() {
+    local service="$1"
+    local state_file="$RESTART_STATE_DIR/${service}.last_restart"
+
+    if [ -f "$state_file" ]; then
+        cat "$state_file"
+    else
+        echo "0"
+    fi
+}
+
+write_restart_timestamp() {
+    local service="$1"
+    local ts="$2"
+    local state_file="$RESTART_STATE_DIR/${service}.last_restart"
+
+    printf '%s\n' "$ts" > "$state_file"
+}
+
+restart_in_cooldown() {
+    local service="$1"
+    local now last
+
+    now=$(date +%s)
+    last=$(read_restart_timestamp "$service")
+
+    if ! [[ "$last" =~ ^[0-9]+$ ]]; then
+        last=0
+    fi
+
+    [ $((now - last)) -lt "$TRANSACTOR_RESTART_COOLDOWN_SECONDS" ]
+}
+
+restart_container() {
+    local service="$1"
+    local container
+
+    container=$(get_container "$service")
+    if [ -z "$container" ]; then
+        alert "CRITICAL: $service container not found for restart"
+        return 1
+    fi
+
+    if docker restart "$container" >/dev/null 2>&1; then
+        write_restart_timestamp "$service" "$(date +%s)"
+        log "Restarted $service container $container"
+        return 0
+    fi
+
+    alert "CRITICAL: Failed to restart $service container $container"
+    return 1
+}
+
+read_auth_probe_failures() {
+    local service="$1"
+    local state_file="$AUTH_PROBE_STATE_DIR/${service}.count"
+
+    if [ -f "$state_file" ]; then
+        cat "$state_file"
+    else
+        echo "0"
+    fi
+}
+
+write_auth_probe_failures() {
+    local service="$1"
+    local count="$2"
+    local state_file="$AUTH_PROBE_STATE_DIR/${service}.count"
+
+    printf '%s\n' "$count" > "$state_file"
+}
+
+run_transactor_auth_probe() {
+    local service="$1"
+    local candidate_url="$2"
+    local network email password workspace prior_count next_count output status
+
+    network=$(get_stack_network)
+    if [ -z "$network" ]; then
+        alert "CRITICAL: Unable to determine Huly Docker network for authenticated transactor probe"
+        return 1
+    fi
+
+    email=$(get_container_env huly-mcp HULY_EMAIL "emanuvaderland@gmail.com")
+    password=$(get_container_env huly-mcp HULY_PASSWORD "k2a8yy7sFWVZ6eL")
+    workspace=$(get_container_env huly-mcp HULY_WORKSPACE "agentspace")
+    prior_count=$(read_auth_probe_failures "$service")
+    if ! [[ "$prior_count" =~ ^[0-9]+$ ]]; then
+        prior_count=0
+    fi
+    next_count=$((prior_count + 1))
+
+    output=$(docker run --rm \
+        --network "$network" \
+        -v "$PROBE_SCRIPT_PATH:/app/transactor-auth-healthcheck.js:ro" \
+        -e ACCOUNTS_URL="$PROBE_ACCOUNTS_URL" \
+        -e HULY_EMAIL="$email" \
+        -e HULY_PASSWORD="$password" \
+        -e HULY_WORKSPACE="$workspace" \
+        -e TRANSACTOR_NODE_IDENTITY="$service" \
+        -e TRANSACTOR_AUTH_FAILURE_COUNT="$next_count" \
+        "$PROBE_RUNNER_IMAGE" \
+        node /app/transactor-auth-healthcheck.js --candidate-url "$candidate_url" 2>&1)
+    status=$?
+
+    if [ "$status" -eq 0 ]; then
+        if [ "$prior_count" -gt 0 ] 2>/dev/null; then
+            log "$service authenticated probe recovered after $prior_count consecutive failures"
+        fi
+        write_auth_probe_failures "$service" "0"
+        log "$service authenticated probe: healthy"
+        return 0
+    fi
+
+    write_auth_probe_failures "$service" "$next_count"
+    log "$service authenticated probe output: $output"
+    alert "WARNING: $service failed authenticated probe (${next_count}/${AUTH_PROBE_FAILURE_THRESHOLD})"
+
+    if [ "$next_count" -ge "$AUTH_PROBE_FAILURE_THRESHOLD" ] 2>/dev/null; then
+        alert "CRITICAL: $service failed ${next_count} consecutive authenticated probes"
+    fi
+
+    return 1
 }
 
 check_disk_usage() {
@@ -121,6 +286,10 @@ check_transactor_health() {
             alert "WARNING: Transactor-$i has $hung hung requests"
             ((unhealthy++)) || true
         fi
+
+        if ! run_transactor_auth_probe "transactor-$i" "ws://transactor-$i:3333"; then
+            ((unhealthy++)) || true
+        fi
     done
 
     if [ "$unhealthy" -gt 2 ]; then
@@ -179,7 +348,7 @@ check_kafka_health() {
 }
 
 check_rest_api_health() {
-    local response=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://localhost:3458/health 2>/dev/null || echo "000")
+    local response=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$REST_HEALTH_URL" 2>/dev/null || echo "000")
 
     if [ "$response" != "200" ]; then
         alert "WARNING: REST API unhealthy (HTTP $response)"
@@ -191,7 +360,7 @@ check_rest_api_health() {
 }
 
 check_mcp_health() {
-    local response=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://localhost:3457/health 2>/dev/null || echo "000")
+    local response=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$MCP_HEALTH_URL" 2>/dev/null || echo "000")
 
     if [ "$response" != "200" ]; then
         alert "WARNING: MCP Server unhealthy (HTTP $response)"
@@ -205,6 +374,11 @@ check_mcp_health() {
 check_docker_log_sizes() {
     local warned=0
     local max_bytes=$((50 * 1024 * 1024))  # 50MB
+
+    if [ ! -d /var/lib/docker/containers ]; then
+        log "Docker logs: host container log directory not mounted; skipping size check"
+        return 0
+    fi
 
     for log_file in /var/lib/docker/containers/*/*-json.log; do
         [ -f "$log_file" ] || continue
@@ -230,14 +404,47 @@ auto_recover() {
 
         if echo "$alerts" | grep -q "hung requests"; then
             log "Attempting auto-recovery: restarting transactors"
-            docker compose restart transactor-1 transactor-2 transactor-3 transactor-4 transactor-5
+            for service in transactor-1 transactor-2 transactor-3 transactor-4 transactor-5; do
+                restart_container "$service" || true
+                sleep 10
+            done
             sleep 30
-            docker compose restart huly-rest-api huly-mcp
+            restart_container huly-rest-api || true
+            restart_container huly-mcp || true
         fi
 
         if echo "$alerts" | grep -q "REST API unhealthy"; then
             log "Attempting auto-recovery: restarting REST API"
-            docker compose restart huly-rest-api
+            restart_container huly-rest-api || true
+        fi
+
+        if echo "$alerts" | grep -q "consecutive authenticated probes"; then
+            local services restarted=0
+            services=$(echo "$alerts" | grep "consecutive authenticated probes" | grep -oE 'transactor-[0-9]+' | sort -u)
+
+            if ! check_cockroach_health >/dev/null 2>&1; then
+                alert "WARNING: Skipping transactor auto-recovery while CockroachDB is unhealthy"
+                rm -f "$ALERT_FILE"
+                return
+            fi
+
+            for service in $services; do
+                if restart_in_cooldown "$service"; then
+                    log "Skipping $service restart; still in cooldown window"
+                    continue
+                fi
+
+                log "Attempting auto-recovery: restarting $service after authenticated probe failures"
+                if restart_container "$service"; then
+                    write_auth_probe_failures "$service" "0"
+                    restarted=1
+                    break
+                fi
+            done
+
+            if [ "$restarted" -eq 0 ]; then
+                log "No transactor restart performed; all failing services were in cooldown or restart failed"
+            fi
         fi
 
         rm -f "$ALERT_FILE"

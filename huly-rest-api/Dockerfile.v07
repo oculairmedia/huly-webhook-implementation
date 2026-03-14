@@ -50,28 +50,31 @@ RUN node -e "const pkg=require('./package.json'); \
     require('fs').writeFileSync('./package.json', JSON.stringify(pkg,null,2));" && \
     npm install --production --legacy-peer-deps --ignore-scripts
 
-# Create symlinks from /app/node_modules/@hcengineering to /huly packages
-# This allows the app to require('@hcengineering/package') normally
+# Create symlinks from /app/node_modules/@hcengineering to the built Huly packages.
+# Always use the package.json name field and replace existing links explicitly so
+# foundations packages can override legacy plugins/models packages when names overlap.
 RUN mkdir -p /app/node_modules/@hcengineering && \
-    cd /huly/packages && \
-    for dir in */; do \
-        pkg=$(basename "$dir"); \
-        ln -sf "/huly/packages/$pkg" "/app/node_modules/@hcengineering/$pkg"; \
+    link_hc_pkg() { \
+        dir="$1"; \
+        [ -f "$dir/package.json" ] || return 0; \
+        name=$(node -e "try{const n=require('$dir/package.json').name;if(n&&n.startsWith('@hcengineering/'))console.log(n.replace('@hcengineering/',''))}catch(e){}"); \
+        [ -n "$name" ] || return 0; \
+        dest="/app/node_modules/@hcengineering/$name"; \
+        rm -rf "$dest"; \
+        ln -s "$dir" "$dest"; \
+    }; \
+    for base in packages plugins models; do \
+        if [ -d "/huly/$base" ]; then \
+            for dir in /huly/$base/*/; do \
+                link_hc_pkg "$dir"; \
+            done; \
+        fi; \
     done && \
-    cd /huly/plugins && \
-    for dir in */; do \
-        pkg=$(basename "$dir"); \
-        ln -sf "/huly/plugins/$pkg" "/app/node_modules/@hcengineering/$pkg"; \
-    done && \
-    cd /huly/models && \
-    for dir in */; do \
-        pkg=$(basename "$dir"); \
-        ln -sf "/huly/models/$pkg" "/app/node_modules/@hcengineering/$pkg"; \
-    done && \
-    cd /huly/communication/packages && \
-    for dir in */; do \
-        pkg=$(basename "$dir"); \
-        ln -sf "/huly/communication/packages/$pkg" "/app/node_modules/@hcengineering/communication-$pkg"; \
+    for fdn in /huly/foundations/*/; do \
+        [ -d "$fdn/packages" ] || continue; \
+        for dir in "$fdn"/packages/*/; do \
+            link_hc_pkg "$dir"; \
+        done; \
     done
 
 # Create non-root user (chown only /app, /huly stays as root since it's read-only)

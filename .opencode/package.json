@@ -8,7 +8,7 @@
     "rebuild": "npm run clean && npm run build"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.1.12"
+    "@opencode-ai/plugin": "1.2.26"
   },
   "devDependencies": {
     "@types/node": "^24.7.2",

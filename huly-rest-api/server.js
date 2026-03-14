@@ -1,3 +1,14 @@
+// Log level gate: suppress info/debug output when LOG_LEVEL=error
+if (process.env.LOG_LEVEL === 'error') {
+  const _err = console.error.bind(console);
+  const _warn = console.warn.bind(console);
+  console.log = () => {};
+  console.info = () => {};
+  console.debug = () => {};
+  console.error = _err;
+  console.warn = _warn;
+}
+
 /**
  * Huly REST API Server
  *
@@ -76,7 +87,9 @@ let clientPool = [];
 let poolIndex = 0;
 let cachedToken = null;
 let healthCheckInterval = null;
+let recycleInterval = null;
 const POOL_HEALTH_CHECK_INTERVAL = 30000;
+const CLIENT_RECYCLE_INTERVAL = 4 * 60 * 60 * 1000; // 4 hours
 
 // Connection resilience configuration
 const CONNECTION_CONFIG = {
@@ -648,6 +661,74 @@ function startPoolHealthCheck() {
 
   if (healthCheckInterval.unref) healthCheckInterval.unref();
   console.log(`[Huly REST] Background health check started (every ${POOL_HEALTH_CHECK_INTERVAL / 1000}s)`);
+}
+
+/**
+ * Periodically recycle client connections to free accumulated SDK memory.
+ * The Huly SDK caches hierarchy/document metadata internally without bounds,
+ * so reconnecting every few hours resets that state and prevents memory creep.
+ */
+function startClientRecycling() {
+  if (recycleInterval) return;
+  if (!config.transactorUrl) return; // Only for internal connections
+
+  let recycleIndex = 0; // Rotate which client gets recycled each cycle
+
+  recycleInterval = setInterval(async () => {
+    if (clientPool.length === 0 || !cachedToken) return;
+
+    // Recycle one client per cycle (staggered to avoid disruption)
+    const idx = recycleIndex % clientPool.length;
+    recycleIndex++;
+
+    const url = config.transactorUrls[idx] || config.transactorUrl;
+    if (!url) return;
+
+    const memBefore = process.memoryUsage();
+    console.log(`[Huly REST] ♻ Recycling pool client ${idx} (${url}) — RSS: ${(memBefore.rss / 1024 / 1024).toFixed(1)} MiB, Heap: ${(memBefore.heapUsed / 1024 / 1024).toFixed(1)} MiB`);
+
+    try {
+      // Close old connection
+      const oldClient = clientPool[idx];
+      
+      // Connect fresh client first (so pool is never missing a slot)
+      const result = await connectToTransactor(url, cachedToken, 1);
+      if (result) {
+        clientPool[idx] = result.client;
+
+        // Update primary if it was pointing to the old client
+        if (hulyClient === oldClient) {
+          hulyClient = result.client;
+        }
+
+        // Close old client after replacement
+        try { 
+          if (oldClient && typeof oldClient.close === 'function') {
+            await oldClient.close(); 
+          }
+        } catch (e) { /* ignore close errors */ }
+
+        // Clear caches to release references to old SDK objects
+        metadataCache.clear();
+
+        // Suggest V8 GC if available (only works with --expose-gc, but harmless otherwise)
+        if (global.gc) {
+          global.gc();
+        }
+
+        const memAfter = process.memoryUsage();
+        console.log(`[Huly REST] ♻ Client ${idx} recycled — RSS: ${(memAfter.rss / 1024 / 1024).toFixed(1)} MiB, Heap: ${(memAfter.heapUsed / 1024 / 1024).toFixed(1)} MiB (delta: ${((memAfter.rss - memBefore.rss) / 1024 / 1024).toFixed(1)} MiB)`);
+      } else {
+        console.error(`[Huly REST] ♻ Failed to recycle client ${idx} — keeping old connection`);
+      }
+    } catch (error) {
+      console.error(`[Huly REST] ♻ Error recycling client ${idx}:`, error.message);
+    }
+  }, CLIENT_RECYCLE_INTERVAL / (config.transactorUrls.length || 1)); // Stagger: recycle one client at a time
+
+  if (recycleInterval.unref) recycleInterval.unref();
+  const intervalMin = (CLIENT_RECYCLE_INTERVAL / (config.transactorUrls.length || 1)) / 60000;
+  console.log(`[Huly REST] ♻ Client recycling started (one client every ${intervalMin.toFixed(0)} min, full cycle every ${CLIENT_RECYCLE_INTERVAL / 3600000}h)`);
 }
 
 /**
@@ -3287,6 +3368,7 @@ async function initializeClientWithRetry() {
     try {
       await initializeClient();
       startPoolHealthCheck();
+      startClientRecycling();
       console.log('[Huly REST] ✅ Client initialization complete — API fully operational');
       return;
     } catch (error) {
@@ -3315,12 +3397,14 @@ async function startServer() {
 process.on('SIGINT', () => {
   console.log('\n[Huly REST] Shutting down gracefully...');
   if (healthCheckInterval) clearInterval(healthCheckInterval);
+  if (recycleInterval) clearInterval(recycleInterval);
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
   console.log('\n[Huly REST] Shutting down gracefully...');
   if (healthCheckInterval) clearInterval(healthCheckInterval);
+  if (recycleInterval) clearInterval(recycleInterval);
   process.exit(0);
 });
 

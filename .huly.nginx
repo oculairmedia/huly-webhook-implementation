@@ -13,6 +13,7 @@ server {
     listen 80;
     server_name _;
     client_max_body_size 100M;
+    access_log off;
 
     # Docker DNS resolver for dynamic container resolution
     resolver 127.0.0.11 valid=10s ipv6=off;

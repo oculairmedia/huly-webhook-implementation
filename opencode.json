@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "huly": {
+      "type": "remote",
+      "url": "http://192.168.50.90:3457/mcp",
+      "enabled": true
+    }
+  }
+}
